@@ -784,10 +784,18 @@ input {
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 12px;
+  color: var(--text);
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.05);
+  text-align: left;
+}
+
+.task-row:hover {
+  border-color: rgba(223, 155, 208, 0.45);
+  background: rgba(255, 255, 255, 0.075);
 }
 
 .task-row span {
@@ -801,8 +809,16 @@ input {
   font-weight: 900;
 }
 
+.task-row strong {
+  color: var(--text);
+}
+
 .task-row small {
   color: var(--muted);
+}
+
+.soft-badge {
+  border-radius: 999px;
 }
 
 .progress {

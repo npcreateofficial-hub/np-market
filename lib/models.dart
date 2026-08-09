@@ -2,6 +2,7 @@ class Product {
   const Product({
     required this.id,
     required this.name,
+    this.shopId = '',
     required this.shopName,
     required this.category,
     required this.price,
@@ -25,6 +26,7 @@ class Product {
 
   final String id;
   final String name;
+  final String shopId;
   final String shopName;
   final String category;
   final double price;
@@ -86,6 +88,26 @@ class Shop {
   final double rating;
   final int productCount;
   final String badge;
+}
+
+class CustomerAccount {
+  const CustomerAccount({
+    required this.id,
+    required this.email,
+    required this.displayName,
+    required this.phone,
+    this.role = 'buyer',
+    this.hasProfile = true,
+  });
+
+  final String id;
+  final String email;
+  final String displayName;
+  final String phone;
+  final String role;
+  final bool hasProfile;
+
+  String get nameOrEmail => displayName.isNotEmpty ? displayName : email;
 }
 
 class SellerProfile {
@@ -165,7 +187,8 @@ class Address {
   final String label;
 
   String get shortAddress => '$detail $subDistrict $district $province';
-  String get fullAddress => '$detail $subDistrict $district $province $postcode';
+  String get fullAddress =>
+      '$detail $subDistrict $district $province $postcode';
 
   Address copyWith({bool? isDefault}) {
     return Address(

@@ -50,6 +50,7 @@ app.*.map.json
 .gradle_user/
 platform-tools/
 current-screen.png
+work/
 
 # Web admin build/dependency output
 admin_web/node_modules/
@@ -57,3 +58,4 @@ admin_web/.next/
 admin_web/out/
 admin_web/.env
 admin_web/.env.*
+!admin_web/.env.local.example

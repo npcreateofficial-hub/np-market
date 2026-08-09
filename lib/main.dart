@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models.dart';
+import 'supabase_market_api.dart';
 
 const appBg = Color(0xFFFFFFFF);
 const surface = Colors.white;
@@ -24,15 +25,21 @@ final appStore = AppStore();
 
 List<Product> get marketplaceProducts => [
       ...appStore.sellerProducts,
-      ...featuredProducts,
+      ...(appStore.remoteProducts.isNotEmpty
+          ? appStore.remoteProducts
+          : featuredProducts),
     ];
 
 class AppStore extends ChangeNotifier {
   final List<CartItem> _cartItems = [];
   final List<Order> _orders = [];
+  final List<Product> _remoteProducts = [];
   final List<Product> _sellerProducts = [];
   final Map<String, String> _sellerProductStatuses = {};
   final Set<String> _reviewedOrderIds = {};
+  CustomerAccount? _customerAccount;
+  CustomerSession? _customerSession;
+  bool _isAuthBusy = false;
   SellerProfile? _sellerProfile;
   final List<Address> _addresses = [
     const Address(
@@ -63,7 +70,12 @@ class AppStore extends ChangeNotifier {
 
   List<CartItem> get cartItems => List.unmodifiable(_cartItems);
   List<Order> get orders => List.unmodifiable(_orders);
+  List<Product> get remoteProducts => List.unmodifiable(_remoteProducts);
   List<Product> get sellerProducts => List.unmodifiable(_sellerProducts);
+  CustomerAccount? get customerAccount => _customerAccount;
+  bool get isSignedIn => _customerSession != null;
+  bool get isAuthenticated => _customerSession != null;
+  bool get isAuthBusy => _isAuthBusy;
   bool isOrderReviewed(Order order) => _reviewedOrderIds.contains(order.id);
   String sellerProductStatus(Product product) =>
       _sellerProductStatuses[product.id] ??
@@ -81,6 +93,110 @@ class AppStore extends ChangeNotifier {
 
   double get cartTotal =>
       _cartItems.fold(0, (total, item) => total + item.total);
+
+  Future<void> signInCustomer({
+    required String email,
+    required String password,
+  }) async {
+    _setAuthBusy(true);
+    try {
+      final api = const SupabaseMarketApi();
+      final session = await api.signInCustomer(
+        email: email,
+        password: password,
+      );
+      var profile = await api.fetchCustomerProfile(
+        session: session,
+        email: session.email.isEmpty ? email : session.email,
+      );
+      if (!profile.hasProfile) {
+        final fallbackName = email.trim().split('@').first;
+        await api.upsertCustomerProfile(
+          session: session,
+          email: email,
+          displayName: fallbackName,
+          phone: '',
+        );
+        profile = CustomerAccount(
+          id: session.userId,
+          email: session.email.isEmpty ? email : session.email,
+          displayName: fallbackName,
+          phone: '',
+        );
+      }
+      var orders = const <Order>[];
+      try {
+        orders = await api.fetchOrders(accessToken: session.accessToken);
+      } catch (_) {
+        orders = const <Order>[];
+      }
+      _customerSession = session;
+      _customerAccount = profile;
+      _orders
+        ..clear()
+        ..addAll(orders);
+      notifyListeners();
+    } finally {
+      _setAuthBusy(false);
+    }
+  }
+
+  Future<void> registerCustomer({
+    required String displayName,
+    required String phone,
+    required String email,
+    required String password,
+  }) async {
+    _setAuthBusy(true);
+    try {
+      final api = const SupabaseMarketApi();
+      final session = await api.registerCustomer(
+        displayName: displayName,
+        phone: phone,
+        email: email,
+        password: password,
+      );
+      _customerSession = session;
+      _customerAccount = CustomerAccount(
+        id: session.userId,
+        email: session.email.isEmpty ? email : session.email,
+        displayName:
+            displayName.trim().isEmpty ? email.trim() : displayName.trim(),
+        phone: phone.trim(),
+      );
+      _orders.clear();
+      notifyListeners();
+    } finally {
+      _setAuthBusy(false);
+    }
+  }
+
+  void signOutCustomer() {
+    _customerSession = null;
+    _customerAccount = null;
+    _cartItems.clear();
+    _orders.clear();
+    notifyListeners();
+  }
+
+  void _setAuthBusy(bool value) {
+    _isAuthBusy = value;
+    notifyListeners();
+  }
+
+  Future<void> loadRemoteCatalog() async {
+    if (!isSupabaseEnabled || _remoteProducts.isNotEmpty) return;
+    try {
+      final products = await const SupabaseMarketApi().fetchProducts();
+      if (products.isEmpty) return;
+      _remoteProducts
+        ..clear()
+        ..addAll(products);
+      notifyListeners();
+    } catch (_) {
+      // Keep bundled demo data available when Supabase is not ready.
+    }
+  }
 
   void addToCart(CartItem item) {
     final index = _cartItems.indexWhere(
@@ -186,7 +302,29 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  Order createOrder(List<CartItem> items, String paymentMethod) {
+  Future<Order> createOrder(List<CartItem> items, String paymentMethod) async {
+    if (isSupabaseEnabled &&
+        items.every((item) => item.product.shopId.isNotEmpty)) {
+      final session = _customerSession;
+      if (session == null) {
+        throw StateError('กรุณาเข้าสู่ระบบก่อนสั่งซื้อ');
+      }
+      final orders = await const SupabaseMarketApi().createCheckoutOrders(
+        items: items,
+        address: selectedAddress,
+        paymentMethod: paymentMethod,
+        session: session,
+      );
+      if (orders.isNotEmpty) {
+        _orders.insertAll(0, orders);
+        for (final item in items) {
+          _cartItems.remove(item);
+        }
+        notifyListeners();
+        return orders.first;
+      }
+    }
+
     final order = Order(
       id: 'NP${DateTime.now().millisecondsSinceEpoch}',
       items: List.unmodifiable(items),
@@ -243,69 +381,89 @@ class NpMarketApp extends StatelessWidget {
       ),
       home: const MarketplaceShell(),
       routes: {
+        '/auth': (_) => const AuthScreen(),
         '/home': (_) => const MarketplaceShell(),
         '/search': (_) => const SearchScreen(),
         '/cart': (_) => const CartScreen(),
-        '/orders': (_) => const OrdersScreen(),
-        '/seller': (_) => const SellerCenterScreen(),
-        '/seller/add-product': (_) => const SellerProductFormScreen(),
-        '/seller/orders': (_) => const SellerOrdersScreen(),
-        '/seller/products': (_) => const SellerProductsScreen(),
-        '/seller/settings': (_) => const OpenShopScreen(),
-        '/seller/shipping': (_) => const SellerShippingSettingsScreen(),
-        '/seller/delivery': (_) => const SellerDeliveryScreen(),
-        '/seller/balance': (_) => const SellerBalanceScreen(),
+        '/orders': (_) => const AuthRequiredScreen(child: OrdersScreen()),
+        '/seller': (_) => const AuthRequiredScreen(child: SellerCenterScreen()),
+        '/seller/add-product': (_) =>
+            const AuthRequiredScreen(child: SellerProductFormScreen()),
+        '/seller/orders': (_) =>
+            const AuthRequiredScreen(child: SellerOrdersScreen()),
+        '/seller/products': (_) =>
+            const AuthRequiredScreen(child: SellerProductsScreen()),
+        '/seller/settings': (_) =>
+            const AuthRequiredScreen(child: OpenShopScreen()),
+        '/seller/shipping': (_) =>
+            const AuthRequiredScreen(child: SellerShippingSettingsScreen()),
+        '/seller/delivery': (_) =>
+            const AuthRequiredScreen(child: SellerDeliveryScreen()),
+        '/seller/balance': (_) =>
+            const AuthRequiredScreen(child: SellerBalanceScreen()),
         '/seller/income': (_) => const SellerSimpleScreen(
               title: 'รายรับของฉัน',
               icon: Icons.account_balance_outlined,
-              message: 'สรุปรายรับจากออเดอร์สำเร็จ รายการรอโอน และประวัติถอนเงินของร้าน',
+              message:
+                  'สรุปรายรับจากออเดอร์สำเร็จ รายการรอโอน และประวัติถอนเงินของร้าน',
             ),
         '/seller/rating': (_) => const SellerSimpleScreen(
               title: 'คะแนนร้านค้า',
               icon: Icons.star_border,
-              message: 'ดูคะแนนร้าน รีวิวสินค้า อัตราการตอบแชท และคุณภาพบริการหลังการขาย',
+              message:
+                  'ดูคะแนนร้าน รีวิวสินค้า อัตราการตอบแชท และคุณภาพบริการหลังการขาย',
             ),
         '/seller/stats': (_) => const SellerSimpleScreen(
               title: 'สถิติร้านค้าของฉัน',
               icon: Icons.trending_up_outlined,
-              message: 'ดูยอดเข้าชมสินค้า ยอดขาย อัตราการสั่งซื้อ และสินค้าที่ทำผลงานดีที่สุด',
+              message:
+                  'ดูยอดเข้าชมสินค้า ยอดขาย อัตราการสั่งซื้อ และสินค้าที่ทำผลงานดีที่สุด',
             ),
         '/seller/assistant': (_) => const SellerSimpleScreen(
               title: 'ผู้ช่วยการขาย',
               icon: Icons.sell_outlined,
-              message: 'รวมคำแนะนำการเพิ่มสินค้า โปรโมชัน การตอบแชท และงานที่ร้านควรทำต่อ',
+              message:
+                  'รวมคำแนะนำการเพิ่มสินค้า โปรโมชัน การตอบแชท และงานที่ร้านควรทำต่อ',
             ),
         '/seller/help': (_) => const SellerSimpleScreen(
               title: 'ศูนย์ช่วยเหลือร้านค้า',
               icon: Icons.help_outline,
-              message: 'คู่มือเปิดร้าน ลงสินค้า จัดส่งสินค้า คืนเงิน และการใช้งานระบบร้านค้า',
+              message:
+                  'คู่มือเปิดร้าน ลงสินค้า จัดส่งสินค้า คืนเงิน และการใช้งานระบบร้านค้า',
             ),
-        '/me/addresses': (_) => const AddressSelectionScreen(),
-        '/payment-methods': (_) => const PaymentMethodsScreen(),
+        '/me/addresses': (_) =>
+            const AuthRequiredScreen(child: AddressSelectionScreen()),
+        '/payment-methods': (_) =>
+            const AuthRequiredScreen(child: PaymentMethodsScreen()),
         '/me/vouchers': (_) => const MeSubPage(
               title: 'คูปองของฉัน',
               icon: Icons.confirmation_number_outlined,
-              message: 'รวมคูปองร้านค้า คูปองส่วนลด และโค้ดส่งฟรีที่ผู้ใช้เก็บไว้',
+              message:
+                  'รวมคูปองร้านค้า คูปองส่วนลด และโค้ดส่งฟรีที่ผู้ใช้เก็บไว้',
             ),
         '/me/favorites': (_) => const MeSubPage(
               title: 'สินค้าที่ถูกใจ',
               icon: Icons.favorite_border,
-              message: 'รายการสินค้าที่ผู้ใช้กดถูกใจ เพื่อกลับมาดูหรือซื้อภายหลัง',
+              message:
+                  'รายการสินค้าที่ผู้ใช้กดถูกใจ เพื่อกลับมาดูหรือซื้อภายหลัง',
             ),
         '/me/reviews': (_) => const MeSubPage(
               title: 'รีวิวของฉัน',
               icon: Icons.rate_review_outlined,
-              message: 'สินค้าที่รอให้คะแนน รีวิวที่เขียนแล้ว และรูปภาพ/วิดีโอรีวิว',
+              message:
+                  'สินค้าที่รอให้คะแนน รีวิวที่เขียนแล้ว และรูปภาพ/วิดีโอรีวิว',
             ),
         '/me/chat': (_) => const MeSubPage(
               title: 'แชท',
               icon: Icons.chat_bubble_outline,
-              message: 'กล่องข้อความระหว่างผู้ซื้อกับร้านค้า สำหรับถามสินค้าและติดตามคำสั่งซื้อ',
+              message:
+                  'กล่องข้อความระหว่างผู้ซื้อกับร้านค้า สำหรับถามสินค้าและติดตามคำสั่งซื้อ',
             ),
         '/me/notifications': (_) => const MeSubPage(
               title: 'การแจ้งเตือน',
               icon: Icons.notifications_none,
-              message: 'แจ้งเตือนคำสั่งซื้อ โปรโมชัน แชท และข่าวสารจาก NP Market',
+              message:
+                  'แจ้งเตือนคำสั่งซื้อ โปรโมชัน แชท และข่าวสารจาก NP Market',
             ),
         '/me/returns': (_) => const MeSubPage(
               title: 'คืนสินค้า/คืนเงิน',
@@ -315,7 +473,8 @@ class NpMarketApp extends StatelessWidget {
         '/me/help': (_) => const MeSubPage(
               title: 'ศูนย์ช่วยเหลือ',
               icon: Icons.support_agent,
-              message: 'คำถามที่พบบ่อย วิธีสั่งซื้อ การชำระเงิน การจัดส่ง และการติดต่อทีมช่วยเหลือ',
+              message:
+                  'คำถามที่พบบ่อย วิธีสั่งซื้อ การชำระเงิน การจัดส่ง และการติดต่อทีมช่วยเหลือ',
             ),
         '/me/settings': (_) => const AccountSettingsScreen(),
         '/me/campaigns': (_) => const MeSubPage(
@@ -336,9 +495,507 @@ class NpMarketApp extends StatelessWidget {
         '/me/recent': (_) => const MeSubPage(
               title: 'ดูล่าสุด',
               icon: Icons.history_outlined,
-              message: 'สินค้าที่ผู้ใช้เคยเปิดดู เพื่อกลับมาซื้อหรือตรวจสอบภายหลัง',
+              message:
+                  'สินค้าที่ผู้ใช้เคยเปิดดู เพื่อกลับมาซื้อหรือตรวจสอบภายหลัง',
             ),
       },
+    );
+  }
+}
+
+Future<bool> requireCustomerLogin(BuildContext context) async {
+  if (appStore.isAuthenticated) return true;
+  final result = await Navigator.of(context).push<bool>(
+    MaterialPageRoute(builder: (_) => const AuthScreen(popOnSuccess: true)),
+  );
+  return result == true || appStore.isAuthenticated;
+}
+
+class AuthRequiredScreen extends StatelessWidget {
+  const AuthRequiredScreen({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: appStore,
+      builder: (context, _) {
+        if (appStore.isAuthenticated) return child;
+        return Scaffold(
+          backgroundColor: const Color(0xFFF6F6F6),
+          appBar: AppBar(
+            backgroundColor: Colors.white,
+            foregroundColor: ink,
+            elevation: 0,
+          ),
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.lock_outline, size: 56, color: ink),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'เข้าสู่ระบบเพื่อใช้งาน',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: ink,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'ดูออเดอร์ ชำระเงิน และเปิดร้านได้หลังเข้าสู่ระบบ',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: muted, height: 1.4),
+                  ),
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: FilledButton(
+                      onPressed: () => requireCustomerLogin(context),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.black,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: const Text('เข้าสู่ระบบ'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: appStore,
+      builder: (context, _) {
+        return appStore.isSignedIn
+            ? const MarketplaceShell()
+            : const AuthScreen();
+      },
+    );
+  }
+}
+
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key, this.popOnSuccess = false});
+
+  final bool popOnSuccess;
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
+  bool _isRegister = true;
+  bool _obscurePassword = true;
+  bool _obscureConfirmPassword = true;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    FocusScope.of(context).unfocus();
+    if (!_formKey.currentState!.validate()) return;
+    if (!isSupabaseEnabled) {
+      _showError('ยังไม่สามารถเชื่อมต่อได้');
+      return;
+    }
+
+    try {
+      if (_isRegister) {
+        await appStore.registerCustomer(
+          displayName: _nameController.text,
+          phone: '',
+          email: _emailController.text,
+          password: _passwordController.text,
+        );
+      } else {
+        await appStore.signInCustomer(
+          email: _emailController.text,
+          password: _passwordController.text,
+        );
+      }
+      if (!mounted) return;
+      if (widget.popOnSuccess) {
+        Navigator.of(context).pop(true);
+      } else {
+        Navigator.of(context)
+            .pushNamedAndRemoveUntil('/home', (route) => false);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      _showError(_friendlyAuthError(error));
+    }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: accent),
+    );
+  }
+
+  String _friendlyAuthError(Object error) {
+    final raw = error.toString().replaceFirst('Bad state: ', '');
+    if (raw.contains('Invalid login credentials')) {
+      return 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
+    }
+    if (raw.contains('User already registered')) {
+      return 'อีเมลนี้สมัครไว้แล้ว ลองกดเข้าสู่ระบบ';
+    }
+    if (raw.contains('email confirmation')) {
+      return 'สมัครแล้ว กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ';
+    }
+    return raw;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: AutofillGroup(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(34, 12, 34, 26),
+              children: [
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 8,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () {
+                      if (Navigator.of(context).canPop()) {
+                        Navigator.of(context).pop(false);
+                      } else {
+                        Navigator.of(context).pushNamedAndRemoveUntil(
+                          '/home',
+                          (route) => false,
+                        );
+                      }
+                    },
+                    child: const Text(
+                      'ข้าม',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 44),
+                Center(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.white, width: 4),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'NP Market',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 23,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 36),
+                Text(
+                  _isRegister ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 27,
+                    height: 1.1,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _isRegister ? 'สร้างบัญชีใหม่' : 'ยินดีต้อนรับกลับ',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFFA8A8A8),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 40),
+                if (_isRegister) ...[
+                  AuthTextField(
+                    controller: _nameController,
+                    icon: Icons.person_outline,
+                    label: 'ชื่อ',
+                    hint: '',
+                    autofillHints: const [AutofillHints.name],
+                    validator: (value) =>
+                        value.trim().isEmpty ? 'กรุณาใส่ชื่อ' : null,
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                AuthTextField(
+                  controller: _emailController,
+                  icon: Icons.mail_outline,
+                  label: 'อีเมล',
+                  hint: '',
+                  keyboardType: TextInputType.emailAddress,
+                  autofillHints: const [AutofillHints.email],
+                  validator: (value) {
+                    final text = value.trim();
+                    if (text.isEmpty) return 'กรุณาใส่อีเมล';
+                    if (!text.contains('@')) return 'อีเมลไม่ถูกต้อง';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 14),
+                AuthTextField(
+                  controller: _passwordController,
+                  icon: Icons.lock_outline,
+                  label: 'รหัสผ่าน',
+                  hint: '',
+                  obscureText: _obscurePassword,
+                  autofillHints: const [AutofillHints.password],
+                  suffixIcon: IconButton(
+                    onPressed: () => setState(
+                      () => _obscurePassword = !_obscurePassword,
+                    ),
+                    icon: Icon(
+                      _obscurePassword
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                      color: const Color(0xFF8C8C8C),
+                    ),
+                  ),
+                  validator: (value) =>
+                      value.length < 8 ? 'รหัสผ่านอย่างน้อย 8 ตัวอักษร' : null,
+                ),
+                if (_isRegister) ...[
+                  const SizedBox(height: 14),
+                  AuthTextField(
+                    controller: _confirmPasswordController,
+                    icon: Icons.lock_outline,
+                    label: 'ยืนยันรหัสผ่าน',
+                    hint: '',
+                    obscureText: _obscureConfirmPassword,
+                    autofillHints: const [AutofillHints.newPassword],
+                    suffixIcon: IconButton(
+                      onPressed: () => setState(
+                        () =>
+                            _obscureConfirmPassword = !_obscureConfirmPassword,
+                      ),
+                      icon: Icon(
+                        _obscureConfirmPassword
+                            ? Icons.visibility_off_outlined
+                            : Icons.visibility_outlined,
+                        color: const Color(0xFF8C8C8C),
+                      ),
+                    ),
+                    validator: (value) =>
+                        value != _passwordController.text.trim()
+                            ? 'รหัสผ่านไม่ตรงกัน'
+                            : null,
+                  ),
+                ],
+                if (!_isRegister) ...[
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: appStore.isAuthBusy ? null : () {},
+                    child: const Text(
+                      'ลืมรหัสผ่าน?',
+                      style: TextStyle(
+                        color: Color(0xFFB7B7B7),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 28),
+                AnimatedBuilder(
+                  animation: appStore,
+                  builder: (context, _) {
+                    final busy = appStore.isAuthBusy;
+                    return SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: FilledButton(
+                        onPressed: busy ? null : _submit,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
+                          disabledBackgroundColor: const Color(0xFF262626),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(26),
+                          ),
+                        ),
+                        child: busy
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.4,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : Text(
+                                _isRegister ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 15,
+                                ),
+                              ),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 22),
+                Center(
+                  child: TextButton(
+                    onPressed: appStore.isAuthBusy
+                        ? null
+                        : () => setState(() => _isRegister = !_isRegister),
+                    child: Text(
+                      _isRegister
+                          ? 'มีบัญชีแล้ว? เข้าสู่ระบบ'
+                          : 'ยังไม่มีบัญชี? สมัครสมาชิก',
+                      style: const TextStyle(
+                        color: Color(0xFFB7B7B7),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class AuthTextField extends StatelessWidget {
+  const AuthTextField({
+    super.key,
+    required this.controller,
+    required this.icon,
+    required this.label,
+    required this.hint,
+    this.keyboardType,
+    this.obscureText = false,
+    this.suffixIcon,
+    this.autofillHints,
+    this.validator,
+  });
+
+  final TextEditingController controller;
+  final IconData icon;
+  final String label;
+  final String hint;
+  final TextInputType? keyboardType;
+  final bool obscureText;
+  final Widget? suffixIcon;
+  final Iterable<String>? autofillHints;
+  final String? Function(String value)? validator;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: keyboardType,
+      obscureText: obscureText,
+      autofillHints: autofillHints,
+      cursorColor: Colors.white,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 14.5,
+        fontWeight: FontWeight.w600,
+      ),
+      decoration: InputDecoration(
+        prefixIcon: Icon(icon, color: const Color(0xFFBDBDBD), size: 21),
+        prefixIconConstraints: const BoxConstraints(
+          minWidth: 48,
+          minHeight: 58,
+        ),
+        suffixIcon: suffixIcon,
+        hintText: label,
+        labelText: null,
+        floatingLabelBehavior: FloatingLabelBehavior.never,
+        filled: true,
+        fillColor: Colors.black,
+        isDense: true,
+        constraints: const BoxConstraints(minHeight: 58),
+        hintStyle: const TextStyle(
+          color: Color(0xFF8D8688),
+          fontSize: 14.5,
+          fontWeight: FontWeight.w600,
+        ),
+        contentPadding: const EdgeInsets.fromLTRB(0, 19, 14, 19),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: Color(0xFF3D3D3D), width: 1.1),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: Colors.white70, width: 1.2),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: accent),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: accent, width: 1.2),
+        ),
+      ),
+      validator: (value) => validator?.call(value?.trim() ?? ''),
     );
   }
 }
@@ -352,6 +1009,23 @@ class MarketplaceShell extends StatefulWidget {
 
 class _MarketplaceShellState extends State<MarketplaceShell> {
   int selectedIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    appStore.addListener(_onStoreChanged);
+    appStore.loadRemoteCatalog();
+  }
+
+  @override
+  void dispose() {
+    appStore.removeListener(_onStoreChanged);
+    super.dispose();
+  }
+
+  void _onStoreChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -384,7 +1058,10 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedIndex,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        onDestinationSelected: (index) => setState(() => selectedIndex = index),
+        onDestinationSelected: (index) async {
+          if (index == 4 && !await requireCustomerLogin(context)) return;
+          setState(() => selectedIndex = index);
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
@@ -715,7 +1392,8 @@ class SellerEntryCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
               ),
             ),
-            onPressed: () {
+            onPressed: () async {
+              if (!await requireCustomerLogin(context)) return;
               if (appStore.hasSellerShop) {
                 Navigator.of(context).pushNamed('/seller');
                 return;
@@ -963,8 +1641,10 @@ class VideoFeatureBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final videos =
-        marketplaceProducts.where((product) => product.isVideo).take(2).toList();
+    final videos = marketplaceProducts
+        .where((product) => product.isVideo)
+        .take(2)
+        .toList();
 
     return SizedBox(
       height: 178,
@@ -1462,6 +2142,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     );
   }
 }
+
 class DetailMediaGallery extends StatelessWidget {
   const DetailMediaGallery({super.key, required this.product});
 
@@ -1661,9 +2342,9 @@ class DetailPriceBlock extends StatelessWidget {
                   style: TextStyle(color: muted, fontSize: 12)),
               const Spacer(),
               IconButton(
-                  onPressed: () {},
-                  icon: const Icon(Icons.share_outlined, color: accent),
-                  tooltip: 'แชร์',
+                onPressed: () {},
+                icon: const Icon(Icons.share_outlined, color: accent),
+                tooltip: 'แชร์',
               ),
             ],
           ),
@@ -1819,6 +2500,7 @@ class VariantPreviewStrip extends StatelessWidget {
 }
 
 bool hasSizeOptionsFor(Product product) => product.sizeOptions.isNotEmpty;
+
 class DetailSizeChartBlock extends StatelessWidget {
   const DetailSizeChartBlock({super.key, required this.product});
 
@@ -2162,8 +2844,7 @@ class ShopeeShopProductTile extends StatelessWidget {
                             color: Color(0xFFFFB300), size: 12),
                         const SizedBox(width: 2),
                         Text(product.rating.toStringAsFixed(1),
-                            style:
-                                const TextStyle(color: ink, fontSize: 10.5)),
+                            style: const TextStyle(color: ink, fontSize: 10.5)),
                       ],
                     ),
                   ],
@@ -2308,8 +2989,8 @@ class ShopeeSpecCollapseBlock extends StatelessWidget {
         children: [
           InkWell(
             onTap: () => showProductDescriptionSheet(context, product),
-            child: const ShopeeCollapseRow(
-                title: 'คุณสมบัติและรายละเอียดสินค้า'),
+            child:
+                const ShopeeCollapseRow(title: 'คุณสมบัติและรายละเอียดสินค้า'),
           ),
           const Divider(height: 1),
         ],
@@ -2870,8 +3551,7 @@ class ProductActionBar extends StatelessWidget {
               child: OutlinedButton(
                 onPressed: () => showProductOptionSheet(
                     context, product, ProductOptionAction.cart,
-                    initialColor: selectedColor,
-                    initialSize: selectedSize),
+                    initialColor: selectedColor, initialSize: selectedSize),
                 style: OutlinedButton.styleFrom(
                     foregroundColor: accent,
                     side: const BorderSide(color: accent),
@@ -2885,8 +3565,7 @@ class ProductActionBar extends StatelessWidget {
               child: FilledButton(
                 onPressed: () => showProductOptionSheet(
                     context, product, ProductOptionAction.buy,
-                    initialColor: selectedColor,
-                    initialSize: selectedSize),
+                    initialColor: selectedColor, initialSize: selectedSize),
                 style: FilledButton.styleFrom(
                     backgroundColor: accent,
                     foregroundColor: Colors.white,
@@ -2918,11 +3597,11 @@ void showProductOptionSheet(
     shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(14))),
     builder: (context) => ProductOptionSheet(
-          product: product,
-          action: action,
-          initialColor: initialColor,
-          initialSize: initialSize,
-        ),
+      product: product,
+      action: action,
+      initialColor: initialColor,
+      initialSize: initialSize,
+    ),
   );
 }
 
@@ -2960,9 +3639,10 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
             colorOptions.contains(widget.initialColor)
         ? widget.initialColor!
         : (colorOptions.isNotEmpty ? colorOptions.first : '');
-    selectedSize = widget.initialSize != null && sizeOptions.contains(widget.initialSize)
-        ? widget.initialSize!
-        : (sizeOptions.isNotEmpty ? sizeOptions.first : '');
+    selectedSize =
+        widget.initialSize != null && sizeOptions.contains(widget.initialSize)
+            ? widget.initialSize!
+            : (sizeOptions.isNotEmpty ? sizeOptions.first : '');
   }
 
   @override
@@ -3019,8 +3699,7 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
                               height: 1)),
                       const SizedBox(height: 6),
                       Text('คลัง: $stock',
-                          style:
-                              const TextStyle(color: muted, fontSize: 12.5)),
+                          style: const TextStyle(color: muted, fontSize: 12.5)),
                       if (selectedSummary.isNotEmpty) ...[
                         const SizedBox(height: 6),
                         Text('เลือกแล้ว: $selectedSummary',
@@ -3124,25 +3803,28 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
     );
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final item = CartItem(
       product: widget.product,
       color: selectedColor.isNotEmpty ? selectedColor : 'มาตรฐาน',
       size: selectedSize,
       quantity: quantity,
     );
-    Navigator.pop(context);
     if (widget.action == ProductOptionAction.cart) {
+      Navigator.pop(context);
       appStore.addToCart(item);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('เพิ่มสินค้าในตะกร้าแล้ว')),
       );
     } else {
+      if (!await requireCustomerLogin(context)) return;
+      Navigator.pop(context);
       Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => CheckoutScreen(items: [item])));
     }
   }
 }
+
 class ChoicePill extends StatelessWidget {
   const ChoicePill(
       {super.key,
@@ -3270,7 +3952,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       bottomNavigationBar: CheckoutBottomBar(
         total: subtotal - platformDiscount,
         savings: platformDiscount,
-        onPressed: () {
+        onPressed: () async {
+          if (!await requireCustomerLogin(context)) return;
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => PaymentMockScreen(items: widget.items),
@@ -3398,7 +4081,6 @@ class CheckoutShopCard extends StatelessWidget {
   }
 }
 
-
 class CheckoutStoreLine extends StatelessWidget {
   const CheckoutStoreLine({
     super.key,
@@ -3458,6 +4140,7 @@ class CheckoutStoreLine extends StatelessWidget {
     );
   }
 }
+
 class CheckoutPlatformVoucherCard extends StatelessWidget {
   const CheckoutPlatformVoucherCard({super.key, required this.subtotal});
 
@@ -3660,7 +4343,6 @@ class CheckoutBottomBar extends StatelessWidget {
   }
 }
 
-
 class ShippingSelectionScreen extends StatelessWidget {
   const ShippingSelectionScreen({super.key, required this.selected});
 
@@ -3799,7 +4481,8 @@ class ShippingSelectionScreen extends StatelessWidget {
           padding: const EdgeInsets.all(10),
           color: Colors.white,
           child: FilledButton(
-            onPressed: () => Navigator.of(context).pop(selectedOption.selectedLabel),
+            onPressed: () =>
+                Navigator.of(context).pop(selectedOption.selectedLabel),
             style: FilledButton.styleFrom(
               backgroundColor: accent,
               foregroundColor: Colors.white,
@@ -3975,6 +4658,7 @@ class ShippingOptionTile extends StatelessWidget {
     );
   }
 }
+
 class PaymentMethodScreen extends StatefulWidget {
   const PaymentMethodScreen({super.key, required this.selected});
 
@@ -4225,6 +4909,7 @@ class CheckoutAddressCard extends StatelessWidget {
     );
   }
 }
+
 class AddressSelectionScreen extends StatefulWidget {
   const AddressSelectionScreen({super.key});
 
@@ -4337,7 +5022,8 @@ class AddressChoiceTile extends StatelessWidget {
                   Wrap(
                     spacing: 6,
                     children: [
-                      if (address.isDefault) const ProductMiniTag(label: 'ค่าเริ่มต้น'),
+                      if (address.isDefault)
+                        const ProductMiniTag(label: 'ค่าเริ่มต้น'),
                       if (address.label.isNotEmpty)
                         ProductMiniTag(label: address.label),
                     ],
@@ -4463,7 +5149,8 @@ class _AddressFormScreenState extends State<AddressFormScreen> {
                 onTap: () async {
                   final value = await Navigator.of(context).push<AddressArea>(
                     MaterialPageRoute(
-                      builder: (_) => AreaSelectionScreen(selectedArea: selectedArea),
+                      builder: (_) =>
+                          AreaSelectionScreen(selectedArea: selectedArea),
                     ),
                   );
                   if (value != null) setState(() => selectedArea = value);
@@ -4570,7 +5257,8 @@ class AddressFormCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
+      child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start, children: children),
     );
   }
 }
@@ -4599,7 +5287,8 @@ class AddressTextField extends StatelessWidget {
         hintText: hint,
         hintStyle: const TextStyle(color: Color(0xFFB8B8B8)),
         border: const UnderlineInputBorder(borderSide: BorderSide(color: line)),
-        enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: line)),
+        enabledBorder:
+            const UnderlineInputBorder(borderSide: BorderSide(color: line)),
       ),
     );
   }
@@ -4711,6 +5400,7 @@ class _AreaSelectionScreenState extends State<AreaSelectionScreen> {
       loading = false;
     });
   }
+
   int get step {
     if (selectedProvince == null) return 0;
     if (selectedDistrict == null) return 1;
@@ -4730,6 +5420,7 @@ class _AreaSelectionScreenState extends State<AreaSelectionScreen> {
         return 'ค้นหา รหัสไปรษณีย์';
     }
   }
+
   String get sectionTitle {
     switch (step) {
       case 0:
@@ -4742,6 +5433,7 @@ class _AreaSelectionScreenState extends State<AreaSelectionScreen> {
         return selectedSubDistrict ?? 'รหัสไปรษณีย์';
     }
   }
+
   List<String> get currentOptions {
     Iterable<AddressArea> filteredAreas = areas;
     if (selectedProvince != null) {
@@ -4757,23 +5449,28 @@ class _AreaSelectionScreenState extends State<AreaSelectionScreen> {
           .where((area) => area.subDistrict == selectedSubDistrict);
     }
 
-    final values = filteredAreas.map((area) {
-      switch (step) {
-        case 0:
-          return area.province;
-        case 1:
-          return area.district;
-        case 2:
-          return area.subDistrict;
-        default:
-          return area.postcode;
-      }
-    }).toSet().toList(growable: false)
+    final values = filteredAreas
+        .map((area) {
+          switch (step) {
+            case 0:
+              return area.province;
+            case 1:
+              return area.district;
+            case 2:
+              return area.subDistrict;
+            default:
+              return area.postcode;
+          }
+        })
+        .toSet()
+        .toList(growable: false)
       ..sort();
 
     final query = keyword.trim();
     if (query.isEmpty) return values;
-    return values.where((value) => value.contains(query)).toList(growable: false);
+    return values
+        .where((value) => value.contains(query))
+        .toList(growable: false);
   }
 
   void goBackStep() {
@@ -4868,8 +5565,7 @@ class _AreaSelectionScreenState extends State<AreaSelectionScreen> {
                 for (final option in options)
                   ListTile(
                     title: Text(option),
-                    trailing:
-                        const Icon(Icons.chevron_right, color: muted),
+                    trailing: const Icon(Icons.chevron_right, color: muted),
                     onTap: () => selectOption(option),
                   ),
               ],
@@ -5062,7 +5758,8 @@ class _CartScreenState extends State<CartScreen> {
   Widget build(BuildContext context) {
     final items = appStore.cartItems;
     final grouped = _groupByShop(items);
-    final allSelected = items.isNotEmpty && selectedItems.length == items.length;
+    final allSelected =
+        items.isNotEmpty && selectedItems.length == items.length;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F6F6),
@@ -5112,8 +5809,14 @@ class _CartScreenState extends State<CartScreen> {
               onSelectAll: _toggleAll,
               onCheckout: selectedItems.isEmpty
                   ? null
-                  : () => Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => CheckoutScreen(items: selectedList))),
+                  : () async {
+                      if (!await requireCustomerLogin(context)) return;
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => CheckoutScreen(items: selectedList),
+                        ),
+                      );
+                    },
             ),
     );
   }
@@ -5494,29 +6197,67 @@ class CartCheckBox extends StatelessWidget {
     );
   }
 }
-class PaymentMockScreen extends StatelessWidget {
+
+class PaymentMockScreen extends StatefulWidget {
   const PaymentMockScreen({super.key, required this.items});
 
   final List<CartItem> items;
 
   @override
+  State<PaymentMockScreen> createState() => _PaymentMockScreenState();
+}
+
+class _PaymentMockScreenState extends State<PaymentMockScreen> {
+  bool isSubmitting = false;
+
+  Future<void> _submitOrder() async {
+    if (isSubmitting) return;
+    setState(() => isSubmitting = true);
+    try {
+      final order = await appStore.createOrder(
+        widget.items,
+        'เก็บเงินปลายทาง',
+      );
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => OrderSuccessScreen(order: order)),
+        (route) => route.isFirst,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('สร้างออเดอร์ไม่สำเร็จ: $error'),
+          backgroundColor: accent,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => isSubmitting = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final subtotal = items.fold<double>(0, (total, item) => total + item.total);
+    final subtotal =
+        widget.items.fold<double>(0, (total, item) => total + item.total);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F6F6),
       appBar: AppBar(
-          title: const Text('ชำระเงิน'),
-          backgroundColor: Colors.white,
-          foregroundColor: ink),
+        title: const Text('ชำระเงิน'),
+        backgroundColor: Colors.white,
+        foregroundColor: ink,
+      ),
       body: ListView(
         padding: const EdgeInsets.all(10),
         children: [
           const CheckoutCard(
-              child: DetailInfoTile(
-                  icon: Icons.payments_outlined,
-                  title: 'วิธีชำระเงิน',
-                  value: 'เก็บเงินปลายทาง')),
+            child: DetailInfoTile(
+              icon: Icons.payments_outlined,
+              title: 'วิธีชำระเงิน',
+              value: 'เก็บเงินปลายทาง',
+            ),
+          ),
           CheckoutCard(
             child: Column(
               children: [
@@ -5524,9 +6265,10 @@ class PaymentMockScreen extends StatelessWidget {
                 const CheckoutLine(label: 'ค่าส่ง', value: '฿0'),
                 const Divider(),
                 CheckoutLine(
-                    label: 'ยอดชำระ',
-                    value: formatBaht(subtotal),
-                    strong: true),
+                  label: 'ยอดชำระ',
+                  value: formatBaht(subtotal),
+                  strong: true,
+                ),
               ],
             ),
           ),
@@ -5537,17 +6279,21 @@ class PaymentMockScreen extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: FilledButton(
-            onPressed: () {
-              final order = appStore.createOrder(items, 'เก็บเงินปลายทาง');
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(
-                    builder: (_) => OrderSuccessScreen(order: order)),
-                (route) => route.isFirst,
-              );
-            },
+            onPressed: isSubmitting ? null : _submitOrder,
             style: FilledButton.styleFrom(
-                backgroundColor: accent, foregroundColor: Colors.white),
-            child: const Text('ยืนยันชำระเงิน'),
+              backgroundColor: accent,
+              foregroundColor: Colors.white,
+            ),
+            child: isSubmitting
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Text('ยืนยันชำระเงิน'),
           ),
         ),
       ),
@@ -5605,21 +6351,29 @@ class _SellerCenterScreenState extends State<SellerCenterScreen> {
           SellerHeroCard(seller: seller),
           if (!hasShop)
             SellerStartCard(
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const OpenShopScreen()),
-              ),
+              onTap: () async {
+                if (!await requireCustomerLogin(context)) return;
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const OpenShopScreen()),
+                );
+              },
             )
           else ...[
             SellerOrderStatusPanel(orders: orders),
             SellerToolGrid(
               onAddProduct: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SellerProductFormScreen()),
+                MaterialPageRoute(
+                    builder: (_) => const SellerProductFormScreen()),
               ),
               onOrders: () => Navigator.of(context).pushNamed('/seller/orders'),
-              onProducts: () => Navigator.of(context).pushNamed('/seller/products'),
-              onSettings: () => Navigator.of(context).pushNamed('/seller/settings'),
-              onShipping: () => Navigator.of(context).pushNamed('/seller/shipping'),
-              onBalance: () => Navigator.of(context).pushNamed('/seller/balance'),
+              onProducts: () =>
+                  Navigator.of(context).pushNamed('/seller/products'),
+              onSettings: () =>
+                  Navigator.of(context).pushNamed('/seller/settings'),
+              onShipping: () =>
+                  Navigator.of(context).pushNamed('/seller/shipping'),
+              onBalance: () =>
+                  Navigator.of(context).pushNamed('/seller/balance'),
             ),
             SellerProductList(products: products),
           ],
@@ -5728,7 +6482,8 @@ class SellerStartCard extends StatelessWidget {
         children: [
           const Text(
             'เปิดร้านให้พร้อมก่อนลงสินค้า',
-            style: TextStyle(color: ink, fontSize: 17, fontWeight: FontWeight.w900),
+            style: TextStyle(
+                color: ink, fontSize: 17, fontWeight: FontWeight.w900),
           ),
           const SizedBox(height: 8),
           const Text(
@@ -5742,7 +6497,8 @@ class SellerStartCard extends StatelessWidget {
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(46),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
             child: const Text('เปิดร้านค้า'),
           ),
@@ -5817,8 +6573,10 @@ class SellerTaskCard extends StatelessWidget {
           const SizedBox(height: 10),
           SellerTaskRow(
             icon: Icons.inventory_2_outlined,
-            title: productCount == 0 ? 'ยังไม่มีสินค้าเปิดขาย' : 'สินค้าพร้อมขาย',
-            value: productCount == 0 ? 'เพิ่มสินค้าแรก' : '$productCount รายการ',
+            title:
+                productCount == 0 ? 'ยังไม่มีสินค้าเปิดขาย' : 'สินค้าพร้อมขาย',
+            value:
+                productCount == 0 ? 'เพิ่มสินค้าแรก' : '$productCount รายการ',
           ),
           const Divider(height: 18),
           const SellerTaskRow(
@@ -5954,7 +6712,8 @@ class SellerStatusIcon extends StatelessWidget {
                   right: -8,
                   top: -8,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                     decoration: BoxDecoration(
                       color: accent,
                       borderRadius: BorderRadius.circular(999),
@@ -6245,7 +7004,8 @@ class SellerToolGrid extends StatelessWidget {
 }
 
 class SellerToolTile extends StatelessWidget {
-  const SellerToolTile({super.key, required this.icon, required this.label, this.onTap});
+  const SellerToolTile(
+      {super.key, required this.icon, required this.label, this.onTap});
 
   final IconData icon;
   final String label;
@@ -6323,8 +7083,7 @@ class SellerMenuList extends StatelessWidget {
                 ),
               ),
             ),
-            if (i != entries.length - 1)
-              const Divider(height: 1, indent: 52),
+            if (i != entries.length - 1) const Divider(height: 1, indent: 52),
           ],
         ],
       ),
@@ -6358,7 +7117,8 @@ class _SellerDeliveryScreenState extends State<SellerDeliveryScreen> {
   Widget build(BuildContext context) {
     final orders = appStore.orders;
     final waitingOrders = orders
-        .where((order) => order.status.contains('รอ') || order.status.contains('จัดส่ง'))
+        .where((order) =>
+            order.status.contains('รอ') || order.status.contains('จัดส่ง'))
         .toList();
 
     return Scaffold(
@@ -6380,7 +7140,8 @@ class _SellerDeliveryScreenState extends State<SellerDeliveryScreen> {
                 MeSectionRow(
                   title: 'ช่องทางขนส่งที่เปิดใช้',
                   action: 'ตั้งค่า',
-                  onTap: () => Navigator.of(context).pushNamed('/seller/shipping'),
+                  onTap: () =>
+                      Navigator.of(context).pushNamed('/seller/shipping'),
                 ),
                 const Divider(height: 1),
                 const SellerCarrierRow(name: 'Flash Express', enabled: true),
@@ -6401,7 +7162,8 @@ class _SellerDeliveryScreenState extends State<SellerDeliveryScreen> {
                 MeSectionRow(
                   title: 'ออเดอร์ที่ต้องจัดส่ง',
                   action: 'ดูทั้งหมด',
-                  onTap: () => Navigator.of(context).pushNamed('/seller/orders'),
+                  onTap: () =>
+                      Navigator.of(context).pushNamed('/seller/orders'),
                 ),
                 const Divider(height: 1),
                 if (waitingOrders.isEmpty)
@@ -6425,7 +7187,8 @@ class _SellerDeliveryScreenState extends State<SellerDeliveryScreen> {
 }
 
 class SellerCarrierRow extends StatelessWidget {
-  const SellerCarrierRow({super.key, required this.name, required this.enabled});
+  const SellerCarrierRow(
+      {super.key, required this.name, required this.enabled});
 
   final String name;
   final bool enabled;
@@ -6483,7 +7246,8 @@ class SellerDeliveryOrderRow extends StatelessWidget {
                     item.product.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: ink, fontWeight: FontWeight.w800),
+                    style: const TextStyle(
+                        color: ink, fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 3),
                   Text(
@@ -6711,7 +7475,8 @@ class _SellerProductsScreenState extends State<SellerProductsScreen> {
           color: Colors.white,
           child: FilledButton.icon(
             onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SellerProductFormScreen()),
+              MaterialPageRoute(
+                  builder: (_) => const SellerProductFormScreen()),
             ),
             icon: const Icon(Icons.add_box_outlined),
             label: const Text('เพิ่มสินค้าใหม่'),
@@ -6719,7 +7484,8 @@ class _SellerProductsScreenState extends State<SellerProductsScreen> {
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(48),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
           ),
         ),
@@ -6836,8 +7602,7 @@ class _SellerOrdersScreenState extends State<SellerOrdersScreen> {
           if (filteredOrders.isEmpty)
             const SellerEmptyOrderCard()
           else
-            for (final order in filteredOrders)
-              SellerOrderCard(order: order),
+            for (final order in filteredOrders) SellerOrderCard(order: order),
         ],
       ),
     );
@@ -6919,7 +7684,8 @@ class SellerEmptyOrderCard extends StatelessWidget {
       margin: EdgeInsets.zero,
       child: Column(
         children: [
-          Icon(Icons.receipt_long_outlined, color: muted.withValues(alpha: 0.7), size: 54),
+          Icon(Icons.receipt_long_outlined,
+              color: muted.withValues(alpha: 0.7), size: 54),
           const SizedBox(height: 10),
           const Text(
             'ยังไม่มีออเดอร์ร้านค้า',
@@ -6970,7 +7736,9 @@ class SellerOrderCard extends StatelessWidget {
     appStore.updateOrderShipping(
       orderId: order.id,
       status: nextStatus,
-      carrier: order.carrier == 'ยังไม่ได้เลือกขนส่ง' ? 'Flash Express' : order.carrier,
+      carrier: order.carrier == 'ยังไม่ได้เลือกขนส่ง'
+          ? 'Flash Express'
+          : order.carrier,
       trackingNumber: order.trackingNumber.isEmpty
           ? 'NP${DateTime.now().millisecondsSinceEpoch.toString().substring(6)}'
           : order.trackingNumber,
@@ -6991,7 +7759,8 @@ class SellerOrderCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   order.id,
-                  style: const TextStyle(color: ink, fontWeight: FontWeight.w900),
+                  style:
+                      const TextStyle(color: ink, fontWeight: FontWeight.w900),
                 ),
               ),
               ProductMiniTag(label: order.status, filled: true),
@@ -7028,7 +7797,8 @@ class SellerOrderCard extends StatelessWidget {
                   ),
                   Text(
                     formatBaht(item.total),
-                    style: const TextStyle(color: accent, fontWeight: FontWeight.w900),
+                    style: const TextStyle(
+                        color: accent, fontWeight: FontWeight.w900),
                   ),
                 ],
               ),
@@ -7079,7 +7849,8 @@ class SellerOrderCard extends StatelessWidget {
                 backgroundColor: accent,
                 foregroundColor: Colors.white,
                 visualDensity: VisualDensity.compact,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6)),
               ),
               child: Text(actionLabel),
             ),
@@ -7105,112 +7876,115 @@ class SellerOrderDetailScreen extends StatelessWidget {
           orElse: () => order,
         );
         return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
-      appBar: AppBar(
-        title: const Text('รายละเอียดออเดอร์'),
-        backgroundColor: Colors.white,
-        foregroundColor: ink,
-        elevation: 0,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(10),
-        children: [
-          CheckoutCard(
-            child: Row(
-              children: [
-                const Icon(Icons.receipt_long_outlined, color: accent),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        liveOrder.id,
-                        style: const TextStyle(
-                          color: ink,
-                          fontWeight: FontWeight.w900,
-                        ),
+          backgroundColor: const Color(0xFFF5F5F5),
+          appBar: AppBar(
+            title: const Text('รายละเอียดออเดอร์'),
+            backgroundColor: Colors.white,
+            foregroundColor: ink,
+            elevation: 0,
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(10),
+            children: [
+              CheckoutCard(
+                child: Row(
+                  children: [
+                    const Icon(Icons.receipt_long_outlined, color: accent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            liveOrder.id,
+                            style: const TextStyle(
+                              color: ink,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'สร้างเมื่อ ${formatDate(liveOrder.createdAt)}',
+                            style: const TextStyle(color: muted, fontSize: 12),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        'สร้างเมื่อ ${formatDate(liveOrder.createdAt)}',
-                        style: const TextStyle(color: muted, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                ProductMiniTag(label: liveOrder.status, filled: true),
-              ],
-            ),
-          ),
-          CheckoutCard(
-            child: DetailInfoTile(
-              icon: Icons.location_on_outlined,
-              title: 'ข้อมูลลูกค้าและที่อยู่จัดส่ง',
-              value: liveOrder.address,
-            ),
-          ),
-          CheckoutCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'รายการสินค้า',
-                  style: TextStyle(color: ink, fontWeight: FontWeight.w900),
-                ),
-                const SizedBox(height: 10),
-                for (final item in liveOrder.items) CheckoutItemRow(item: item),
-              ],
-            ),
-          ),
-          CheckoutCard(
-            child: Column(
-              children: [
-                CheckoutLine(
-                  label: 'วิธีชำระเงิน',
-                  value: liveOrder.paymentMethod,
-                ),
-                CheckoutLine(label: 'ขนส่ง', value: liveOrder.carrier),
-                CheckoutLine(
-                  label: 'เลขพัสดุ',
-                  value: liveOrder.trackingNumber.isEmpty
-                      ? 'ยังไม่ได้กรอก'
-                      : liveOrder.trackingNumber,
-                ),
-                CheckoutLine(
-                  label: 'ยอดชำระ',
-                  value: formatBaht(liveOrder.grandTotal),
-                  strong: true,
-                ),
-              ],
-            ),
-          ),
-          CheckoutCard(child: OrderTrackingBlock(order: liveOrder)),
-        ],
-      ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        child: Container(
-          padding: const EdgeInsets.all(10),
-          color: Colors.white,
-          child: FilledButton(
-            onPressed: liveOrder.status == 'สำเร็จ'
-                ? null
-                : () => showModalBottomSheet<void>(
-                      context: context,
-                      showDragHandle: true,
-                      builder: (_) => SellerOrderStatusSheet(order: liveOrder),
                     ),
-            style: FilledButton.styleFrom(
-              backgroundColor: accent,
-              foregroundColor: Colors.white,
-              minimumSize: const Size.fromHeight(48),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-            ),
-            child: const Text('อัปเดตสถานะออเดอร์'),
+                    ProductMiniTag(label: liveOrder.status, filled: true),
+                  ],
+                ),
+              ),
+              CheckoutCard(
+                child: DetailInfoTile(
+                  icon: Icons.location_on_outlined,
+                  title: 'ข้อมูลลูกค้าและที่อยู่จัดส่ง',
+                  value: liveOrder.address,
+                ),
+              ),
+              CheckoutCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'รายการสินค้า',
+                      style: TextStyle(color: ink, fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 10),
+                    for (final item in liveOrder.items)
+                      CheckoutItemRow(item: item),
+                  ],
+                ),
+              ),
+              CheckoutCard(
+                child: Column(
+                  children: [
+                    CheckoutLine(
+                      label: 'วิธีชำระเงิน',
+                      value: liveOrder.paymentMethod,
+                    ),
+                    CheckoutLine(label: 'ขนส่ง', value: liveOrder.carrier),
+                    CheckoutLine(
+                      label: 'เลขพัสดุ',
+                      value: liveOrder.trackingNumber.isEmpty
+                          ? 'ยังไม่ได้กรอก'
+                          : liveOrder.trackingNumber,
+                    ),
+                    CheckoutLine(
+                      label: 'ยอดชำระ',
+                      value: formatBaht(liveOrder.grandTotal),
+                      strong: true,
+                    ),
+                  ],
+                ),
+              ),
+              CheckoutCard(child: OrderTrackingBlock(order: liveOrder)),
+            ],
           ),
-        ),
-      ),
+          bottomNavigationBar: SafeArea(
+            top: false,
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              color: Colors.white,
+              child: FilledButton(
+                onPressed: liveOrder.status == 'สำเร็จ'
+                    ? null
+                    : () => showModalBottomSheet<void>(
+                          context: context,
+                          showDragHandle: true,
+                          builder: (_) =>
+                              SellerOrderStatusSheet(order: liveOrder),
+                        ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: accent,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(48),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(7)),
+                ),
+                child: const Text('อัปเดตสถานะออเดอร์'),
+              ),
+            ),
+          ),
         );
       },
     );
@@ -7305,109 +8079,110 @@ class _SellerOrderStatusSheetState extends State<SellerOrderStatusSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: ink,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w900,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        color: ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
                     ),
                   ),
-                ),
-                IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            CheckoutCard(
-              margin: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  CheckoutLine(label: 'เลขคำสั่งซื้อ', value: order.id),
-                  CheckoutLine(label: 'สถานะปัจจุบัน', value: order.status),
-                  CheckoutLine(
-                    label: 'ยอดชำระ',
-                    value: formatBaht(order.grandTotal),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 10),
-            if (order.status == 'รอร้านยืนยัน')
-              const Text(
-                'ยืนยันแล้วออเดอร์จะย้ายไปสถานะรอจัดส่ง เพื่อให้ร้านเลือกขนส่งและกรอกเลขพัสดุในขั้นตอนถัดไป',
-                style: TextStyle(color: muted, height: 1.35),
-              )
-            else if (isReadyToShip) ...[
-              const Text(
-                'เลือกขนส่ง',
-                style: TextStyle(color: ink, fontWeight: FontWeight.w900),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final carrier in carriers)
-                    ChoiceChip(
-                      selected: selectedCarrier == carrier,
-                      showCheckmark: false,
-                      label: Text(carrier),
-                      selectedColor: accent,
-                      backgroundColor: Colors.white,
-                      side: BorderSide(
-                        color: selectedCarrier == carrier ? accent : line,
-                      ),
-                      labelStyle: TextStyle(
-                        color: selectedCarrier == carrier ? Colors.white : ink,
-                        fontWeight: FontWeight.w800,
-                      ),
-                      onSelected: (_) =>
-                          setState(() => selectedCarrier = carrier),
+              const SizedBox(height: 6),
+              CheckoutCard(
+                margin: EdgeInsets.zero,
+                child: Column(
+                  children: [
+                    CheckoutLine(label: 'เลขคำสั่งซื้อ', value: order.id),
+                    CheckoutLine(label: 'สถานะปัจจุบัน', value: order.status),
+                    CheckoutLine(
+                      label: 'ยอดชำระ',
+                      value: formatBaht(order.grandTotal),
                     ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: trackingController,
-                decoration: InputDecoration(
-                  labelText: 'เลขพัสดุ',
-                  hintText: 'กรอกเลขพัสดุจากขนส่ง',
-                  filled: true,
-                  fillColor: const Color(0xFFF6F6F6),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: line),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: accent),
-                  ),
+                  ],
                 ),
               ),
-            ] else if (order.status == 'ส่งแล้ว')
-              const Text(
-                'ตรวจสอบการจัดส่งแล้วปิดงานสำเร็จ ลูกค้าจะเห็นสถานะได้รับสินค้าและสามารถให้คะแนนได้',
-                style: TextStyle(color: muted, height: 1.35),
-              ),
-            const SizedBox(height: 14),
-            FilledButton(
-              onPressed: _confirm,
-              style: FilledButton.styleFrom(
-                backgroundColor: accent,
-                foregroundColor: Colors.white,
-                minimumSize: const Size.fromHeight(48),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(7),
+              const SizedBox(height: 10),
+              if (order.status == 'รอร้านยืนยัน')
+                const Text(
+                  'ยืนยันแล้วออเดอร์จะย้ายไปสถานะรอจัดส่ง เพื่อให้ร้านเลือกขนส่งและกรอกเลขพัสดุในขั้นตอนถัดไป',
+                  style: TextStyle(color: muted, height: 1.35),
+                )
+              else if (isReadyToShip) ...[
+                const Text(
+                  'เลือกขนส่ง',
+                  style: TextStyle(color: ink, fontWeight: FontWeight.w900),
                 ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final carrier in carriers)
+                      ChoiceChip(
+                        selected: selectedCarrier == carrier,
+                        showCheckmark: false,
+                        label: Text(carrier),
+                        selectedColor: accent,
+                        backgroundColor: Colors.white,
+                        side: BorderSide(
+                          color: selectedCarrier == carrier ? accent : line,
+                        ),
+                        labelStyle: TextStyle(
+                          color:
+                              selectedCarrier == carrier ? Colors.white : ink,
+                          fontWeight: FontWeight.w800,
+                        ),
+                        onSelected: (_) =>
+                            setState(() => selectedCarrier = carrier),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: trackingController,
+                  decoration: InputDecoration(
+                    labelText: 'เลขพัสดุ',
+                    hintText: 'กรอกเลขพัสดุจากขนส่ง',
+                    filled: true,
+                    fillColor: const Color(0xFFF6F6F6),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: line),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: accent),
+                    ),
+                  ),
+                ),
+              ] else if (order.status == 'ส่งแล้ว')
+                const Text(
+                  'ตรวจสอบการจัดส่งแล้วปิดงานสำเร็จ ลูกค้าจะเห็นสถานะได้รับสินค้าและสามารถให้คะแนนได้',
+                  style: TextStyle(color: muted, height: 1.35),
+                ),
+              const SizedBox(height: 14),
+              FilledButton(
+                onPressed: _confirm,
+                style: FilledButton.styleFrom(
+                  backgroundColor: accent,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(48),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                ),
+                child: Text(buttonLabel),
               ),
-              child: Text(buttonLabel),
-            ),
             ],
           ),
         ),
@@ -7434,8 +8209,7 @@ class SellerProductList extends StatelessWidget {
             const Text('ยังไม่มีสินค้า เพิ่มสินค้าแรกเพื่อเปิดขาย',
                 style: TextStyle(color: muted, fontSize: 13))
           else
-            for (final product in products)
-              SellerProductRow(product: product),
+            for (final product in products) SellerProductRow(product: product),
         ],
       ),
     );
@@ -7691,7 +8465,8 @@ class _SellerShippingSettingsScreenState
                 Expanded(
                   child: Text(
                     'หลังลูกค้าสั่งซื้อ ร้านสามารถเลือกขนส่งและใส่เลขพัสดุในหน้าออเดอร์ร้านค้า สถานะจะไปแสดงให้ลูกค้าดูในรายละเอียดคำสั่งซื้อ',
-                    style: TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+                    style:
+                        TextStyle(color: muted, fontSize: 12.5, height: 1.35),
                   ),
                 ),
               ],
@@ -7710,7 +8485,8 @@ class _SellerShippingSettingsScreenState
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(50),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
             child: const Text('บันทึก'),
           ),
@@ -7748,8 +8524,8 @@ class ShippingChannelHeader extends StatelessWidget {
                         color: ink, fontSize: 16, fontWeight: FontWeight.w900)),
                 const SizedBox(height: 3),
                 Text(subtitle,
-                    style:
-                        const TextStyle(color: muted, fontSize: 12.5, height: 1.3)),
+                    style: const TextStyle(
+                        color: muted, fontSize: 12.5, height: 1.3)),
               ],
             ),
           ),
@@ -7841,10 +8617,10 @@ class SellerBalanceScreen extends StatelessWidget {
     final pendingOrders = appStore.orders
         .where((order) => order.status != 'สำเร็จ' && order.status != 'ยกเลิก')
         .toList();
-    final available =
-        completedOrders.fold<double>(0, (total, order) => total + order.grandTotal);
-    final pending =
-        pendingOrders.fold<double>(0, (total, order) => total + order.grandTotal);
+    final available = completedOrders.fold<double>(
+        0, (total, order) => total + order.grandTotal);
+    final pending = pendingOrders.fold<double>(
+        0, (total, order) => total + order.grandTotal);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
@@ -7878,7 +8654,9 @@ class SellerBalanceScreen extends StatelessWidget {
                 const SizedBox(height: 8),
                 Text(formatBaht(available),
                     style: const TextStyle(
-                        color: accent, fontSize: 34, fontWeight: FontWeight.w900)),
+                        color: accent,
+                        fontSize: 34,
+                        fontWeight: FontWeight.w900)),
                 const SizedBox(height: 14),
                 Row(
                   children: [
@@ -7905,7 +8683,8 @@ class SellerBalanceScreen extends StatelessWidget {
           CheckoutCard(
             child: Column(
               children: [
-                SellerBalanceLine(label: 'รอโอนเข้ายอดเงินร้าน', value: pending),
+                SellerBalanceLine(
+                    label: 'รอโอนเข้ายอดเงินร้าน', value: pending),
                 const Divider(height: 20),
                 SellerBalanceLine(
                     label: 'ออเดอร์สำเร็จ', value: available, highlight: true),
@@ -7983,13 +8762,20 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
   void initState() {
     super.initState();
     final seller = appStore.sellerProfile;
-    shopName = TextEditingController(text: seller?.shopName ?? 'NP Basics Store');
+    shopName =
+        TextEditingController(text: seller?.shopName ?? 'NP Basics Store');
     category = TextEditingController(text: seller?.category ?? 'แฟชั่น');
-    ownerName = TextEditingController(text: seller?.ownerName ?? 'ผู้ขาย NP Market');
+    ownerName =
+        TextEditingController(text: seller?.ownerName ?? 'ผู้ขาย NP Market');
     phone = TextEditingController(text: seller?.phone ?? '0987654321');
-    address = TextEditingController(text: seller?.address ?? '789 หมู่ 5 ตำบลพระลับ อำเภอเมืองขอนแก่น จังหวัดขอนแก่น 40000');
-    description = TextEditingController(text: seller?.description ?? 'ร้านค้าพร้อมจัดส่ง สินค้าคัดคุณภาพ รองรับขนส่ง 5 บริษัท');
-    pickupProvince = TextEditingController(text: seller?.pickupProvince ?? 'ขอนแก่น');
+    address = TextEditingController(
+        text: seller?.address ??
+            '789 หมู่ 5 ตำบลพระลับ อำเภอเมืองขอนแก่น จังหวัดขอนแก่น 40000');
+    description = TextEditingController(
+        text: seller?.description ??
+            'ร้านค้าพร้อมจัดส่ง สินค้าคัดคุณภาพ รองรับขนส่ง 5 บริษัท');
+    pickupProvince =
+        TextEditingController(text: seller?.pickupProvince ?? 'ขอนแก่น');
   }
 
   @override
@@ -8006,7 +8792,8 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
 
   void _saveShop() {
     appStore.openSellerShop(SellerProfile(
-      shopName: shopName.text.trim().isEmpty ? 'ร้านใหม่' : shopName.text.trim(),
+      shopName:
+          shopName.text.trim().isEmpty ? 'ร้านใหม่' : shopName.text.trim(),
       category: category.text.trim().isEmpty ? 'ทั่วไป' : category.text.trim(),
       ownerName: ownerName.text.trim(),
       phone: phone.text.trim(),
@@ -8053,7 +8840,8 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
                   Expanded(
                     child: Text(
                       'กรอกข้อมูลร้านค้าให้ครบก่อนเริ่มลงสินค้า หลังจากเปิดร้านแล้วสามารถแก้ไขรายละเอียดร้านค้าได้',
-                      style: TextStyle(color: ink, fontSize: 12.5, height: 1.35),
+                      style:
+                          TextStyle(color: ink, fontSize: 12.5, height: 1.35),
                     ),
                   ),
                 ],
@@ -8172,7 +8960,8 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(50),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
             child: Text(hasShop ? 'บันทึกข้อมูลร้านค้า' : 'บันทึกและเปิดร้าน'),
           ),
@@ -8271,7 +9060,8 @@ class SellerShopLogoRow extends StatelessWidget {
               color: const Color(0xFFFFEDEF),
               borderRadius: BorderRadius.circular(8),
             ),
-            child: const Icon(Icons.storefront_outlined, color: accent, size: 28),
+            child:
+                const Icon(Icons.storefront_outlined, color: accent, size: 28),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -8299,7 +9089,8 @@ class SellerProductFormScreen extends StatefulWidget {
   const SellerProductFormScreen({super.key});
 
   @override
-  State<SellerProductFormScreen> createState() => _SellerProductFormScreenState();
+  State<SellerProductFormScreen> createState() =>
+      _SellerProductFormScreenState();
 }
 
 class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
@@ -8309,7 +9100,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
   final originalPrice = TextEditingController(text: '290');
   final stock = TextEditingController(text: '120');
   final imageUrl = TextEditingController(
-      text: 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800');
+      text:
+          'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800');
   final videoUrl = TextEditingController();
   final sizeChartUrl = TextEditingController();
   final sku = TextEditingController(text: 'NP-SKU-001');
@@ -8319,7 +9111,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
   final colors = TextEditingController(text: 'ขาว, ดำ, เทา');
   final sizes = TextEditingController(text: 'S, M, L, XL');
   final description = TextEditingController(
-      text: 'สินค้าพร้อมจัดส่ง รายละเอียดครบ รองรับการเลือกตัวเลือกสินค้าและขนส่งในแอป');
+      text:
+          'สินค้าพร้อมจัดส่ง รายละเอียดครบ รองรับการเลือกตัวเลือกสินค้าและขนส่งในแอป');
 
   @override
   void dispose() {
@@ -8368,7 +9161,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
             ? 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800'
             : imageUrl.text.trim(),
         badge: 'สินค้าใหม่',
-        location: shipFrom.text.trim().isEmpty ? 'ขอนแก่น' : shipFrom.text.trim(),
+        location:
+            shipFrom.text.trim().isEmpty ? 'ขอนแก่น' : shipFrom.text.trim(),
         shippingLabel: 'ส่งฟรี',
         serviceLabel: 'ร้านใหม่',
         promoLabel: 'โค้ดร้าน',
@@ -8555,7 +9349,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(50),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
             child: const Text('บันทึกและเปิดขาย'),
           ),
@@ -8635,8 +9430,8 @@ class SellerMediaTile extends StatelessWidget {
             Image.network(
               imageUrl!,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => const Icon(Icons.image_outlined,
-                  color: accent, size: 28),
+              errorBuilder: (_, __, ___) =>
+                  const Icon(Icons.image_outlined, color: accent, size: 28),
             )
           else
             Center(
@@ -8690,8 +9485,7 @@ class SellerCompactUrlField extends StatelessWidget {
         hintStyle: const TextStyle(color: muted),
         filled: true,
         fillColor: const Color(0xFFF6F6F6),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
         border: InputBorder.none,
       ),
     );
@@ -8754,7 +9548,8 @@ class SellerInlineTextField extends StatelessWidget {
               ),
               if (required)
                 const Text(' *',
-                    style: TextStyle(color: accent, fontWeight: FontWeight.w900)),
+                    style:
+                        TextStyle(color: accent, fontWeight: FontWeight.w900)),
             ],
           ),
           const SizedBox(height: 7),
@@ -9268,7 +10063,8 @@ class OrderDetailScreen extends StatelessWidget {
               CheckoutCard(
                 child: Column(
                   children: [
-                    for (final item in liveOrder.items) CheckoutItemRow(item: item),
+                    for (final item in liveOrder.items)
+                      CheckoutItemRow(item: item),
                   ],
                 ),
               ),
@@ -9458,7 +10254,8 @@ class _ReviewOrderScreenState extends State<ReviewOrderScreen> {
               backgroundColor: accent,
               foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(48),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7)),
             ),
             child: const Text('ส่งคะแนน'),
           ),
@@ -9881,7 +10678,6 @@ class Panel extends StatelessWidget {
   }
 }
 
-
 class MeScreen extends StatefulWidget {
   const MeScreen({super.key});
 
@@ -9926,10 +10722,22 @@ class _MeScreenState extends State<MeScreen> {
           const MeShortcutPanel(
             title: 'My Wallet',
             items: [
-              MeMenuItem(icon: Icons.payments_outlined, label: 'เก็บเงินปลายทาง', route: '/payment-methods'),
-              MeMenuItem(icon: Icons.qr_code_2_outlined, label: 'QR พร้อมเพย์', route: '/payment-methods'),
-              MeMenuItem(icon: Icons.payments_outlined, label: 'วิธีชำระเงิน', route: '/payment-methods'),
-              MeMenuItem(icon: Icons.confirmation_number_outlined, label: 'โค้ดส่วนลด', route: '/me/vouchers'),
+              MeMenuItem(
+                  icon: Icons.payments_outlined,
+                  label: 'เก็บเงินปลายทาง',
+                  route: '/payment-methods'),
+              MeMenuItem(
+                  icon: Icons.qr_code_2_outlined,
+                  label: 'QR พร้อมเพย์',
+                  route: '/payment-methods'),
+              MeMenuItem(
+                  icon: Icons.payments_outlined,
+                  label: 'วิธีชำระเงิน',
+                  route: '/payment-methods'),
+              MeMenuItem(
+                  icon: Icons.confirmation_number_outlined,
+                  label: 'โค้ดส่วนลด',
+                  route: '/me/vouchers'),
             ],
           ),
           const SizedBox(height: 10),
@@ -9937,10 +10745,26 @@ class _MeScreenState extends State<MeScreen> {
             title: 'บริการทางการเงิน',
             action: 'ดูเพิ่มเติม',
             items: [
-              MeMenuItem(icon: Icons.savings_outlined, label: 'เครดิตร้านค้า', route: '/me/vouchers', trailing: 'ส่วนลดและสิทธิพิเศษ'),
-              MeMenuItem(icon: Icons.phone_android_outlined, label: 'E-Service', route: '/me/e-service', trailing: 'บริการดิจิทัล'),
-              MeMenuItem(icon: Icons.credit_card_outlined, label: 'บัตร/บัญชีธนาคาร', route: '/payment-methods', trailing: 'จัดการช่องทางชำระเงิน'),
-              MeMenuItem(icon: Icons.verified_user_outlined, label: 'คุ้มครองสินค้า', route: '/me/help', trailing: 'ข้อมูลการรับประกัน'),
+              MeMenuItem(
+                  icon: Icons.savings_outlined,
+                  label: 'เครดิตร้านค้า',
+                  route: '/me/vouchers',
+                  trailing: 'ส่วนลดและสิทธิพิเศษ'),
+              MeMenuItem(
+                  icon: Icons.phone_android_outlined,
+                  label: 'E-Service',
+                  route: '/me/e-service',
+                  trailing: 'บริการดิจิทัล'),
+              MeMenuItem(
+                  icon: Icons.credit_card_outlined,
+                  label: 'บัตร/บัญชีธนาคาร',
+                  route: '/payment-methods',
+                  trailing: 'จัดการช่องทางชำระเงิน'),
+              MeMenuItem(
+                  icon: Icons.verified_user_outlined,
+                  label: 'คุ้มครองสินค้า',
+                  route: '/me/help',
+                  trailing: 'ข้อมูลการรับประกัน'),
             ],
           ),
           const SizedBox(height: 10),
@@ -9948,12 +10772,30 @@ class _MeScreenState extends State<MeScreen> {
             title: 'กิจกรรมอื่น ๆ',
             action: 'ดูทั้งหมด',
             items: [
-              MeMenuItem(icon: Icons.storefront_outlined, label: 'เปิดร้านค้า', route: '/seller'),
-              MeMenuItem(icon: Icons.favorite_border, label: 'สิ่งที่ฉันถูกใจ', route: '/me/favorites'),
-              MeMenuItem(icon: Icons.card_giftcard_outlined, label: 'โปรแกรม Affiliate', route: '/me/affiliate'),
-              MeMenuItem(icon: Icons.phone_android_outlined, label: 'E-Service', route: '/me/e-service'),
-              MeMenuItem(icon: Icons.history_outlined, label: 'ดูล่าสุด', route: '/me/recent'),
-              MeMenuItem(icon: Icons.play_circle_outline, label: 'Video', route: '/me/campaigns'),
+              MeMenuItem(
+                  icon: Icons.storefront_outlined,
+                  label: 'เปิดร้านค้า',
+                  route: '/seller'),
+              MeMenuItem(
+                  icon: Icons.favorite_border,
+                  label: 'สิ่งที่ฉันถูกใจ',
+                  route: '/me/favorites'),
+              MeMenuItem(
+                  icon: Icons.card_giftcard_outlined,
+                  label: 'โปรแกรม Affiliate',
+                  route: '/me/affiliate'),
+              MeMenuItem(
+                  icon: Icons.phone_android_outlined,
+                  label: 'E-Service',
+                  route: '/me/e-service'),
+              MeMenuItem(
+                  icon: Icons.history_outlined,
+                  label: 'ดูล่าสุด',
+                  route: '/me/recent'),
+              MeMenuItem(
+                  icon: Icons.play_circle_outline,
+                  label: 'Video',
+                  route: '/me/campaigns'),
             ],
           ),
           const SizedBox(height: 10),
@@ -9975,6 +10817,7 @@ class MeProfileHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final account = appStore.customerAccount;
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 14, 8, 12),
       decoration: const BoxDecoration(
@@ -9996,9 +10839,9 @@ class MeProfileHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'ผู้ใช้ NP Market',
-                  style: TextStyle(
+                Text(
+                  account?.nameOrEmail ?? 'ผู้ใช้ NP Market',
+                  style: const TextStyle(
                     color: Colors.white,
                     fontSize: 18,
                     fontWeight: FontWeight.w900,
@@ -10006,7 +10849,9 @@ class MeProfileHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  seller == null ? 'ลูกค้า' : 'ลูกค้า · ผู้ขาย ${seller?.shopName ?? ''}',
+                  seller == null
+                      ? account?.email ?? 'ลูกค้า'
+                      : 'ลูกค้า · ผู้ขาย ${seller?.shopName ?? ''}',
                   style: const TextStyle(color: Colors.white70, fontSize: 12.5),
                 ),
               ],
@@ -10051,7 +10896,8 @@ class LoginSecurityCard extends StatelessWidget {
               children: [
                 Text(
                   'เข้าสู่ระบบอย่างรวดเร็วและปลอดภัย',
-                  style: TextStyle(color: ink, fontWeight: FontWeight.w900, fontSize: 15),
+                  style: TextStyle(
+                      color: ink, fontWeight: FontWeight.w900, fontSize: 15),
                 ),
                 SizedBox(height: 4),
                 Text(
@@ -10062,8 +10908,9 @@ class LoginSecurityCard extends StatelessWidget {
             ),
           ),
           IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.close, color: muted),
+            onPressed: appStore.signOutCustomer,
+            icon: const Icon(Icons.logout_outlined, color: muted),
+            tooltip: 'ออกจากระบบ',
             constraints: const BoxConstraints.tightFor(width: 36, height: 36),
           ),
         ],
@@ -10119,10 +10966,22 @@ class MePromoCampaignPanel extends StatelessWidget {
     return const MeShortcutPanel(
       title: 'Promotions & Campaigns',
       items: [
-        MeMenuItem(icon: Icons.local_fire_department_outlined, label: '8.8', route: '/me/campaigns'),
-        MeMenuItem(icon: Icons.workspace_premium_outlined, label: 'VIP', route: '/me/vouchers'),
-        MeMenuItem(icon: Icons.local_shipping_outlined, label: 'ส่งฟรี', route: '/me/vouchers'),
-        MeMenuItem(icon: Icons.campaign_outlined, label: 'แคมเปญ', route: '/me/campaigns'),
+        MeMenuItem(
+            icon: Icons.local_fire_department_outlined,
+            label: '8.8',
+            route: '/me/campaigns'),
+        MeMenuItem(
+            icon: Icons.workspace_premium_outlined,
+            label: 'VIP',
+            route: '/me/vouchers'),
+        MeMenuItem(
+            icon: Icons.local_shipping_outlined,
+            label: 'ส่งฟรี',
+            route: '/me/vouchers'),
+        MeMenuItem(
+            icon: Icons.campaign_outlined,
+            label: 'แคมเปญ',
+            route: '/me/campaigns'),
       ],
     );
   }
@@ -10180,10 +11039,24 @@ class MeOrderPanel extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(8, 13, 8, 13),
             child: Row(
               children: [
-                Expanded(child: MeOrderStatus(icon: Icons.account_balance_wallet_outlined, label: 'รอชำระเงิน', count: 0)),
-                Expanded(child: MeOrderStatus(icon: Icons.inventory_2_outlined, label: 'เตรียมจัดส่ง', count: orderCount)),
-                const Expanded(child: MeOrderStatus(icon: Icons.local_shipping_outlined, label: 'กำลังจัดส่ง', count: 0)),
-                const Expanded(child: MeOrderStatus(icon: Icons.star_border, label: 'ให้คะแนน', count: 0)),
+                Expanded(
+                    child: MeOrderStatus(
+                        icon: Icons.account_balance_wallet_outlined,
+                        label: 'รอชำระเงิน',
+                        count: 0)),
+                Expanded(
+                    child: MeOrderStatus(
+                        icon: Icons.inventory_2_outlined,
+                        label: 'เตรียมจัดส่ง',
+                        count: orderCount)),
+                const Expanded(
+                    child: MeOrderStatus(
+                        icon: Icons.local_shipping_outlined,
+                        label: 'กำลังจัดส่ง',
+                        count: 0)),
+                const Expanded(
+                    child: MeOrderStatus(
+                        icon: Icons.star_border, label: 'ให้คะแนน', count: 0)),
               ],
             ),
           ),
@@ -10218,13 +11091,15 @@ class MeOrderStatus extends StatelessWidget {
                 right: -8,
                 top: -7,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
                     color: accent,
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(color: Colors.white),
                   ),
-                  child: Text('$count', style: const TextStyle(color: Colors.white, fontSize: 9)),
+                  child: Text('$count',
+                      style: const TextStyle(color: Colors.white, fontSize: 9)),
                 ),
               ),
           ],
@@ -10233,7 +11108,8 @@ class MeOrderStatus extends StatelessWidget {
         Text(
           label,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: ink, fontSize: 11, fontWeight: FontWeight.w700),
+          style: const TextStyle(
+              color: ink, fontSize: 11, fontWeight: FontWeight.w700),
         ),
       ],
     );
@@ -10250,7 +11126,8 @@ class MeSellerPanel extends StatelessWidget {
   final SellerProfile? seller;
   final int productCount;
 
-  void _openSellerTarget(BuildContext context) {
+  Future<void> _openSellerTarget(BuildContext context) async {
+    if (!await requireCustomerLogin(context)) return;
     if (seller == null) {
       Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const OpenShopScreen()),
@@ -10281,14 +11158,16 @@ class MeSellerPanel extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
                     child: Row(
                       children: [
-                        const IconBox(icon: Icons.storefront_outlined, compact: true),
+                        const IconBox(
+                            icon: Icons.storefront_outlined, compact: true),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                seller?.shopName ?? 'เปิดร้าน ลงสินค้า และรับออเดอร์ได้ที่นี่',
+                                seller?.shopName ??
+                                    'เปิดร้าน ลงสินค้า และรับออเดอร์ได้ที่นี่',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -10304,7 +11183,8 @@ class MeSellerPanel extends StatelessWidget {
                                     : 'สินค้าเปิดขาย $productCount รายการ · รองรับขนส่ง 5 บริษัท',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(color: muted, fontSize: 12.5),
+                                style: const TextStyle(
+                                    color: muted, fontSize: 12.5),
                               ),
                             ],
                           ),
@@ -10412,7 +11292,8 @@ class MeTwoColumnPanel extends StatelessWidget {
                 mainAxisSpacing: 8,
                 childAspectRatio: 2.35,
               ),
-              itemBuilder: (context, index) => MeServiceTile(item: items[index]),
+              itemBuilder: (context, index) =>
+                  MeServiceTile(item: items[index]),
             ),
           ),
         ],
@@ -10429,7 +11310,9 @@ class MeServiceTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return InkWell(
-      onTap: item.route == null ? null : () => Navigator.of(context).pushNamed(item.route!),
+      onTap: item.route == null
+          ? null
+          : () => Navigator.of(context).pushNamed(item.route!),
       borderRadius: BorderRadius.circular(6),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -10625,8 +11508,12 @@ class MeHelpPanel extends StatelessWidget {
     return const MeMenuPanel(
       title: 'ช่วยเหลือ',
       items: [
-        MeMenuItem(icon: Icons.help_outline, label: 'ศูนย์ช่วยเหลือ', route: '/me/help'),
-        MeMenuItem(icon: Icons.support_agent, label: 'Chat กับเรา', route: '/me/chat'),
+        MeMenuItem(
+            icon: Icons.help_outline,
+            label: 'ศูนย์ช่วยเหลือ',
+            route: '/me/help'),
+        MeMenuItem(
+            icon: Icons.support_agent, label: 'Chat กับเรา', route: '/me/chat'),
       ],
     );
   }
@@ -10755,8 +11642,16 @@ class PaymentMethodsScreen extends StatelessWidget {
     const methods = [
       (Icons.payments_outlined, 'เก็บเงินปลายทาง', 'ชำระเงินเมื่อได้รับสินค้า'),
       (Icons.qr_code_2_outlined, 'QR พร้อมเพย์', 'โอนผ่าน QR จากแอปธนาคาร'),
-      (Icons.account_balance_outlined, 'Mobile Banking', 'โอนผ่านธนาคารที่รองรับ'),
-      (Icons.credit_card_outlined, 'บัตรเครดิต/เดบิต', 'รองรับบัตรที่เปิดใช้งานออนไลน์'),
+      (
+        Icons.account_balance_outlined,
+        'Mobile Banking',
+        'โอนผ่านธนาคารที่รองรับ'
+      ),
+      (
+        Icons.credit_card_outlined,
+        'บัตรเครดิต/เดบิต',
+        'รองรับบัตรที่เปิดใช้งานออนไลน์'
+      ),
     ];
 
     return Scaffold(
@@ -10886,7 +11781,8 @@ class SettingsGroup extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-          child: Text(title, style: const TextStyle(color: muted, fontSize: 12.5)),
+          child:
+              Text(title, style: const TextStyle(color: muted, fontSize: 12.5)),
         ),
         Container(
           color: Colors.white,
@@ -11027,7 +11923,8 @@ int orderStageIndex(String status) {
 
 String sellerOrderTabForStatus(String status) {
   if (status.contains('ยกเลิก')) return 'ยกเลิก';
-  if (status.contains('คืนสินค้า') || status.contains('คืนเงิน')) return 'คืนสินค้า';
+  if (status.contains('คืนสินค้า') || status.contains('คืนเงิน'))
+    return 'คืนสินค้า';
   if (status.contains('สำเร็จ') || status.contains('ได้รับ')) return 'สำเร็จ';
   if (status.contains('ส่งแล้ว') || status.contains('กำลังจัดส่ง')) {
     return 'กำลังจัดส่ง';
