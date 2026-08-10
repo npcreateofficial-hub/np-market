@@ -51,6 +51,89 @@ const shopeeProductCategories = [
   'ช้อปปี้เพย์ใกล้ตัว',
 ];
 
+const sellerProductStatusLabels = {
+  "active": "กำลังขาย",
+  "draft": "แบบร่าง",
+  "hidden": "ปิดการขาย",
+  "sold_out": "หมดสต็อก",
+  "suspended": "ระงับสินค้า",
+};
+
+String sellerProductStatusLabel(String status, {int stock = 1}) {
+  if (status == "active" && stock <= 0) return sellerUiText("sold_out");
+  return switch (status) {
+    "active" => sellerUiText("active"),
+    "draft" => sellerUiText("draft"),
+    "hidden" => sellerUiText("hidden"),
+    "sold_out" => sellerUiText("sold_out"),
+    "suspended" => sellerUiText("suspended"),
+    _ => status,
+  };
+}
+
+String sellerUiText(String key) =>
+    const {
+      "active": "กำลังขาย",
+      "draft": "แบบร่าง",
+      "hidden": "ปิดการขาย",
+      "sold_out": "หมดสต็อก",
+      "suspended": "ระงับสินค้า",
+      "delete_product": "ลบสินค้า",
+      "delete_confirm_prefix": "ลบ",
+      "delete_confirm_suffix": "ออกจากร้านของคุณใช่ไหม",
+      "cancel": "ยกเลิก",
+      "delete": "ลบ",
+      "product_deleted": "ลบสินค้าแล้ว",
+      "product_detail": "รายละเอียดสินค้า",
+      "view_customer_page": "ดูหน้าลูกค้า",
+      "edit": "แก้ไข",
+      "stock": "คลัง",
+      "sold": "ขายแล้ว",
+      "media": "สื่อ",
+      "items": "รายการ",
+      "product_options": "ตัวเลือกสินค้า",
+      "color_style": "สี/แบบ",
+      "size": "ขนาด",
+      "details": "รายละเอียด",
+      "empty_description": "ยังไม่ได้ใส่รายละเอียดสินค้า",
+      "category": "หมวดหมู่",
+      "weight": "น้ำหนัก",
+      "parcel_size": "ขนาดพัสดุ",
+      "ships_from": "ส่งจาก",
+      "kg": "กก.",
+      "view": "ดู",
+      "close_sale": "ปิดขาย",
+      "open_sale": "เปิดขาย",
+      "product_attributes": "คุณลักษณะสินค้า",
+      "product_attributes_hint": "ใส่ทีละบรรทัด เช่น วัสดุ: โลหะ, ซิลิโคน",
+      "detail_images": "รูปในรายละเอียดสินค้า",
+      "add_detail_image": "เพิ่มรูปรายละเอียด",
+      "detail_image_helper":
+          "รูปส่วนนี้จะแสดงต่อท้ายรายละเอียดสินค้า ไม่ปนกับรูปแนะนำด้านบน",
+      "attribute_empty": "ยังไม่ได้เพิ่มคุณลักษณะสินค้า",
+    }[key] ??
+    key;
+
+Map<String, String> parseProductAttributes(String value) {
+  final result = <String, String>{};
+  for (final rawLine in value.split(RegExp(r'\r?\n'))) {
+    final line = rawLine.trim();
+    if (line.isEmpty) continue;
+    final splitAt = line.indexOf(':');
+    if (splitAt <= 0) continue;
+    final name = line.substring(0, splitAt).trim();
+    final detail = line.substring(splitAt + 1).trim();
+    if (name.isNotEmpty && detail.isNotEmpty) result[name] = detail;
+  }
+  return result;
+}
+
+String productAttributesText(Map<String, String> attributes) {
+  return attributes.entries
+      .map((entry) => '${entry.key}: ${entry.value}')
+      .join('\n');
+}
+
 List<Product> get marketplaceProducts => [
       ...appStore.sellerProducts,
       ...appStore.remoteProducts,
@@ -81,9 +164,17 @@ class AppStore extends ChangeNotifier {
   bool get isAuthenticated => _customerSession != null;
   bool get isAuthBusy => _isAuthBusy;
   bool isOrderReviewed(Order order) => _reviewedOrderIds.contains(order.id);
-  String sellerProductStatus(Product product) =>
-      _sellerProductStatuses[product.id] ??
-      (product.stock <= 0 ? 'หมดสต๊อก' : 'กำลังขาย');
+  String sellerProductStatusCode(Product product) {
+    final override = _sellerProductStatuses[product.id];
+    if (override != null) return override;
+    if (product.status == "active" && product.stock <= 0) return "sold_out";
+    return product.status;
+  }
+
+  String sellerProductStatus(Product product) => sellerProductStatusLabel(
+        sellerProductStatusCode(product),
+        stock: product.stock,
+      );
   SellerProfile? get sellerProfile => _sellerProfile;
   bool get hasSellerShop => _sellerProfile != null;
   List<Address> get addresses => List.unmodifiable(_addresses);
@@ -422,8 +513,10 @@ class AppStore extends ChangeNotifier {
       await loadRemoteCatalog();
     }
     _sellerProducts.insert(0, savedProduct);
-    _sellerProductStatuses[savedProduct.id] =
-        product.stock <= 0 ? 'หมดสต๊อก' : 'กำลังขาย';
+    _sellerProductStatuses[savedProduct.id] = sellerProductStatusLabel(
+      savedProduct.status,
+      stock: savedProduct.stock,
+    );
     notifyListeners();
   }
 
@@ -457,8 +550,10 @@ class AppStore extends ChangeNotifier {
     } else {
       _sellerProducts.insert(0, savedProduct);
     }
-    _sellerProductStatuses[savedProduct.id] =
-        savedProduct.stock <= 0 ? 'หมดสต็อก' : 'กำลังขาย';
+    _sellerProductStatuses[savedProduct.id] = sellerProductStatusLabel(
+      savedProduct.status,
+      stock: savedProduct.stock,
+    );
     notifyListeners();
   }
 
@@ -854,7 +949,9 @@ class _AuthScreenState extends State<AuthScreen> {
     FocusScope.of(context).unfocus();
     if (!_formKey.currentState!.validate()) return;
     if (!isSupabaseEnabled) {
-      _showError('ยังไม่สามารถเชื่อมต่อได้');
+      _showError(
+        'ยังไม่สามารถเชื่อมต่อ Supabase ได้ กรุณา build ด้วย build-release.cmd',
+      );
       return;
     }
 
@@ -1469,26 +1566,30 @@ class HeaderShortcutStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hasShop = appStore.hasSellerShop;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
       ),
-      child: const Row(
-        children: const [
+      child: Row(
+        children: [
           HeaderShortcut(
-              icon: Icons.confirmation_number_outlined,
-              title: 'คูปอง',
-              subtitle: 'เก็บก่อนซื้อ'),
+            icon: Icons.confirmation_number_outlined,
+            title: 'คูปอง',
+            subtitle: 'เก็บก่อนซื้อ',
+          ),
           HeaderShortcut(
-              icon: Icons.local_shipping_outlined,
-              title: 'ส่งฟรี',
-              subtitle: 'โค้ดส่งฟรี'),
+            icon: Icons.local_shipping_outlined,
+            title: 'ส่งฟรี',
+            subtitle: 'โค้ดส่งฟรี',
+          ),
           HeaderShortcut(
-              icon: Icons.storefront_outlined,
-              title: 'เปิดร้าน',
-              subtitle: 'เริ่มขาย'),
+            icon: Icons.storefront_outlined,
+            title: hasShop ? 'ร้านของฉัน' : 'เปิดร้านค้า',
+            subtitle: hasShop ? 'จัดการร้าน' : 'เริ่มขาย',
+          ),
         ],
       ),
     );
@@ -1623,23 +1724,26 @@ class SellerEntryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hasShop = appStore.hasSellerShop;
     return Panel(
       child: Row(
         children: [
           const IconBox(icon: Icons.storefront_outlined),
           const SizedBox(width: 12),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'มีสินค้าอยากขาย?',
+                  hasShop ? 'ร้านของฉัน' : 'มีสินค้าอยากขาย?',
                   style: TextStyle(
                       color: ink, fontSize: 15, fontWeight: FontWeight.w900),
                 ),
-                SizedBox(height: 3),
+                const SizedBox(height: 3),
                 Text(
-                  'เปิดร้าน ลงสินค้า และรับออเดอร์ได้ที่นี่',
+                  hasShop
+                      ? 'ลงสินค้า จัดการสต๊อก และรับออเดอร์ได้ที่นี่'
+                      : 'เปิดร้านค้า ลงสินค้า และรับออเดอร์ได้ที่นี่',
                   style: TextStyle(color: muted, fontSize: 12),
                 ),
               ],
@@ -1655,7 +1759,7 @@ class SellerEntryCard extends StatelessWidget {
             ),
             onPressed: () async {
               if (!await requireCustomerLogin(context)) return;
-              if (appStore.hasSellerShop) {
+              if (hasShop) {
                 Navigator.of(context).pushNamed('/seller');
                 return;
               }
@@ -1663,7 +1767,7 @@ class SellerEntryCard extends StatelessWidget {
                 MaterialPageRoute(builder: (_) => const OpenShopScreen()),
               );
             },
-            child: const Text('เปิดร้าน'),
+            child: Text(hasShop ? 'ร้านของฉัน' : 'เปิดร้านค้า'),
           ),
         ],
       ),
@@ -1940,6 +2044,15 @@ class SmallVideoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (product.imageUrl.trim().isEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          color: const Color(0xFFEDEFF4),
+          child: const Icon(Icons.add_photo_alternate_outlined, color: muted),
+        ),
+      );
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
       child: Stack(
@@ -2404,30 +2517,112 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   }
 }
 
-class DetailMediaGallery extends StatelessWidget {
+class DetailMediaGallery extends StatefulWidget {
   const DetailMediaGallery({super.key, required this.product});
 
   final Product product;
 
   @override
+  State<DetailMediaGallery> createState() => _DetailMediaGalleryState();
+}
+
+class _DetailMediaGalleryState extends State<DetailMediaGallery> {
+  int selectedIndex = 0;
+
+  @override
   Widget build(BuildContext context) {
+    final product = widget.product;
+    final mediaItems = productDisplayMediaItems(product);
+    final safeMediaItems = mediaItems.isEmpty
+        ? const [ProductMediaItem(type: 'image', url: '')]
+        : mediaItems;
+    final mediaCount = safeMediaItems.length;
+    final safeIndex = selectedIndex.clamp(0, mediaCount - 1).toInt();
+    final selectedMedia = safeMediaItems[safeIndex];
+    final selectedIsVideo = selectedMedia.isVideo;
+    final selectedImage =
+        selectedIsVideo ? product.imageUrl : selectedMedia.url;
+
     return Stack(
       children: [
-        Container(
-          height: 240,
-          width: double.infinity,
-          color: Colors.white,
-          child: Image.network(
-            product.imageUrl,
-            fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => Container(
-              color: const Color(0xFFEDEFF4),
-              child:
-                  const Icon(Icons.image_not_supported_outlined, color: muted),
+        Column(
+          children: [
+            Container(
+              height: 240,
+              width: double.infinity,
+              color: Colors.white,
+              child: selectedImage.trim().isEmpty
+                  ? const Icon(Icons.image_not_supported_outlined, color: muted)
+                  : Image.network(
+                      selectedImage,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, __, ___) => Container(
+                        color: const Color(0xFFEDEFF4),
+                        child: const Icon(
+                          Icons.image_not_supported_outlined,
+                          color: muted,
+                        ),
+                      ),
+                    ),
             ),
-          ),
+            if (mediaCount > 1)
+              Container(
+                height: 70,
+                width: double.infinity,
+                color: Colors.white,
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: mediaCount,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (context, index) {
+                    final media = safeMediaItems[index];
+                    final isVideo = media.isVideo;
+                    final thumbUrl = isVideo ? product.imageUrl : media.url;
+                    final selected = index == safeIndex;
+                    return GestureDetector(
+                      onTap: () => setState(() => selectedIndex = index),
+                      child: Container(
+                        width: 54,
+                        height: 54,
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: selected ? accent : line,
+                            width: selected ? 1.6 : 1,
+                          ),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Image.network(
+                                thumbUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) =>
+                                    Container(color: const Color(0xFFEDEFF4)),
+                              ),
+                              if (isVideo)
+                                Container(
+                                  color: Colors.black.withValues(alpha: 0.22),
+                                  child: const Icon(
+                                    Icons.play_arrow,
+                                    color: Colors.white,
+                                    size: 24,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
         ),
-        if (product.isVideo)
+        if (selectedIsVideo)
           Positioned.fill(
             child: Center(
               child: Container(
@@ -2458,7 +2653,7 @@ class DetailMediaGallery extends StatelessWidget {
               borderRadius: BorderRadius.circular(999),
             ),
             child: Text(
-              product.isVideo ? '1/13' : '1/5',
+              '${safeIndex + 1}/$mediaCount',
               style: const TextStyle(
                   color: Colors.white,
                   fontSize: 12,
@@ -2659,7 +2854,7 @@ class DetailVariantBlock extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Text('ไซส์',
+                const Text('ขนาด',
                     style: TextStyle(color: ink, fontWeight: FontWeight.w900)),
                 const Spacer(),
                 if (product.sizeChartImageUrl != null)
@@ -2717,6 +2912,11 @@ class VariantPreviewStrip extends StatelessWidget {
         itemBuilder: (context, index) {
           final label = labels[index];
           final selected = label == selectedColor;
+          final imageUrl = variantImageUrlForOption(
+            optionType: 'color',
+            optionValue: label,
+            images: product.variantImageUrls,
+          );
           return GestureDetector(
             onTap: () => onColorSelected(label),
             child: Container(
@@ -2732,12 +2932,22 @@ class VariantPreviewStrip extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    Image.network(
-                      product.imageUrl,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) =>
-                          Container(color: const Color(0xFFEDEFF4)),
-                    ),
+                    if (imageUrl.trim().isEmpty)
+                      Container(
+                        color: const Color(0xFFEDEFF4),
+                        child: const Icon(
+                          Icons.add_photo_alternate_outlined,
+                          color: muted,
+                          size: 20,
+                        ),
+                      )
+                    else
+                      Image.network(
+                        imageUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) =>
+                            Container(color: const Color(0xFFEDEFF4)),
+                      ),
                     if (selected)
                       Align(
                         alignment: Alignment.topRight,
@@ -3184,6 +3394,13 @@ class ShopeeSpecificationBlock extends StatelessWidget {
 
   final Product product;
 
+  String get displayDescription => product.description.trim().isEmpty
+      ? description
+      : product.description.trim();
+
+  List<MapEntry<String, String>> get attributeEntries =>
+      product.attributes.entries.toList(growable: false);
+
   String get description =>
       '${product.name} เหมาะสำหรับการใช้งานประจำวัน สินค้าพร้อมจัดส่งจากร้านค้า '
       'มีระบบติดตามคำสั่งซื้อ รองรับการชำระเงินปกติของ NP Market และมีบริการหลังการขายจากร้านค้า '
@@ -3218,8 +3435,10 @@ class ShopeeSpecificationBlock extends StatelessWidget {
                   ? 'สี, ไซส์, คลัง, ปริมาณ, น้ำหนัก'
                   : 'คลัง, ปริมาณ, น้ำหนัก, รุ่นสินค้า'),
           const SizedBox(height: 5),
+          for (final attribute in attributeEntries)
+            DetailLine(label: attribute.key, value: attribute.value),
           Text(
-            description,
+            displayDescription,
             maxLines: 4,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(color: ink, fontSize: 13, height: 1.38),
@@ -3311,13 +3530,37 @@ void showProductDescriptionSheet(BuildContext context, Product product) {
                   DetailLine(label: 'บริการ', value: product.serviceLabel),
                   DetailLine(label: 'โปรโมชั่น', value: product.promoLabel),
                   const SizedBox(height: 12),
+                  if (product.attributes.isNotEmpty) ...[
+                    for (final attribute in product.attributes.entries)
+                      DetailLine(label: attribute.key, value: attribute.value),
+                    const SizedBox(height: 12),
+                  ],
                   Text(
-                    ' สินค้าพร้อมจัดส่งจากร้านค้า มีระบบติดตามคำสั่งซื้อ และรองรับการชำระเงินปกติของ NP Market',
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
+                    product.description.trim().isEmpty
+                        ? 'สินค้าพร้อมจัดส่งจากร้านค้า มีระบบติดตามคำสั่งซื้อ และรองรับการชำระเงินปกติของ NP Market'
+                        : product.description.trim(),
                     style:
                         const TextStyle(color: ink, fontSize: 14, height: 1.45),
                   ),
+                  for (final imageUrl in product.detailImageUrls) ...[
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.network(
+                        imageUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          height: 160,
+                          color: const Color(0xFFF4F4F4),
+                          alignment: Alignment.center,
+                          child: const Icon(
+                            Icons.image_not_supported_outlined,
+                            color: muted,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -3915,6 +4158,11 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
       if (selectedColor.isNotEmpty) selectedColor,
       if (selectedSize.isNotEmpty) selectedSize,
     ].join(', ');
+    final selectedImage = productVariantImageUrl(
+      widget.product,
+      selectedColor,
+      selectedSize,
+    );
 
     return SafeArea(
       child: Padding(
@@ -3936,15 +4184,25 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
                   child: SizedBox(
                     width: 108,
                     height: 108,
-                    child: Image.network(
-                      widget.product.imageUrl,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
-                        color: const Color(0xFFEDEFF4),
-                        child: const Icon(Icons.image_not_supported_outlined,
-                            color: muted),
-                      ),
-                    ),
+                    child: selectedImage.trim().isEmpty
+                        ? Container(
+                            color: const Color(0xFFEDEFF4),
+                            child: const Icon(
+                              Icons.image_not_supported_outlined,
+                              color: muted,
+                            ),
+                          )
+                        : Image.network(
+                            selectedImage,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: const Color(0xFFEDEFF4),
+                              child: const Icon(
+                                Icons.image_not_supported_outlined,
+                                color: muted,
+                              ),
+                            ),
+                          ),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -3988,8 +4246,13 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
                 spacing: 8,
                 runSpacing: 8,
                 children: colorOptions
-                    .map((color) => ChoicePill(
+                    .map((color) => VariantImageChoicePill(
                         label: color,
+                        imageUrl: variantImageUrlForOption(
+                          optionType: 'color',
+                          optionValue: color,
+                          images: widget.product.variantImageUrls,
+                        ),
                         selected: selectedColor == color,
                         onTap: () => setState(() => selectedColor = color)))
                     .toList(),
@@ -3998,7 +4261,7 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
             if (sizeOptions.isNotEmpty) ...[
               const SizedBox(height: 16),
               Row(children: [
-                const Text('ไซส์',
+                const Text('ขนาด',
                     style: TextStyle(color: ink, fontWeight: FontWeight.w900)),
                 const Spacer(),
                 if (widget.product.sizeChartImageUrl != null)
@@ -4065,8 +4328,13 @@ class _ProductOptionSheetState extends State<ProductOptionSheet> {
   }
 
   Future<void> _submit() async {
+    final selectedImage = productVariantImageUrl(
+      widget.product,
+      selectedColor,
+      selectedSize,
+    );
     final item = CartItem(
-      product: widget.product,
+      product: widget.product.copyWith(imageUrl: selectedImage),
       color: selectedColor.isNotEmpty ? selectedColor : 'มาตรฐาน',
       size: selectedSize,
       quantity: quantity,
@@ -4104,6 +4372,83 @@ class ChoicePill extends StatelessWidget {
     return GestureDetector(
       onTap: disabled ? null : onTap,
       child: OptionChip(label: label, selected: selected, disabled: disabled),
+    );
+  }
+}
+
+class VariantImageChoicePill extends StatelessWidget {
+  const VariantImageChoicePill({
+    super.key,
+    required this.label,
+    required this.imageUrl,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final String imageUrl;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 78, maxWidth: 132),
+        padding: const EdgeInsets.fromLTRB(5, 5, 8, 5),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFFFF1ED) : const Color(0xFFF4F4F4),
+          border: Border.all(color: selected ? accent : line),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: SizedBox(
+                width: 34,
+                height: 34,
+                child: imageUrl.trim().isEmpty
+                    ? Container(
+                        color: Colors.white,
+                        child: const Icon(
+                          Icons.image_outlined,
+                          color: muted,
+                          size: 18,
+                        ),
+                      )
+                    : Image.network(
+                        imageUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          color: Colors.white,
+                          child: const Icon(
+                            Icons.image_outlined,
+                            color: muted,
+                            size: 18,
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: selected ? accent : ink,
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -5879,18 +6224,24 @@ class CheckoutItemRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(item.product.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: ink, fontWeight: FontWeight.w800)),
+                Text(
+                  item.product.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      const TextStyle(color: ink, fontWeight: FontWeight.w800),
+                ),
                 const SizedBox(height: 3),
-                Text('${item.color}, ${item.size}',
-                    style: const TextStyle(color: muted, fontSize: 12)),
+                Text(
+                  '${item.color}, ${item.size}',
+                  style: const TextStyle(color: muted, fontSize: 12),
+                ),
                 const SizedBox(height: 5),
-                Text(formatBaht(item.product.price),
-                    style: const TextStyle(
-                        color: accent, fontWeight: FontWeight.w900)),
+                Text(
+                  formatBaht(item.product.price),
+                  style: const TextStyle(
+                      color: accent, fontWeight: FontWeight.w900),
+                ),
               ],
             ),
           ),
@@ -8563,6 +8914,336 @@ class SellerProductList extends StatelessWidget {
   }
 }
 
+void openSellerProductDetail(BuildContext context, Product product) {
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => SellerProductDetailScreen(product: product),
+    ),
+  );
+}
+
+Future<void> confirmDeleteSellerProduct(
+  BuildContext context,
+  Product product, {
+  bool closeCurrentAfterDelete = false,
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(sellerUiText("delete_product")),
+      content: Text(
+        '${sellerUiText("delete_confirm_prefix")} "${product.name}" ${sellerUiText("delete_confirm_suffix")}',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: Text(sellerUiText("cancel")),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          style: FilledButton.styleFrom(
+            backgroundColor: accent,
+            foregroundColor: Colors.white,
+          ),
+          child: Text(sellerUiText("delete")),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+  final navigator = Navigator.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  await appStore.deleteSellerProduct(product);
+  if (closeCurrentAfterDelete && navigator.canPop()) {
+    navigator.pop();
+  }
+  messenger.showSnackBar(
+    SnackBar(content: Text(sellerUiText("product_deleted"))),
+  );
+}
+
+class SellerProductDetailScreen extends StatelessWidget {
+  const SellerProductDetailScreen({super.key, required this.product});
+
+  final Product product;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = appStore.sellerProductStatus(product);
+    final statusCode = appStore.sellerProductStatusCode(product);
+    final active = statusCode == "active";
+    final mediaCount = productDisplayMediaItems(product).length;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
+      appBar: AppBar(
+        title: Text(sellerUiText("product_detail")),
+        backgroundColor: Colors.white,
+        foregroundColor: ink,
+        elevation: 0,
+        actions: [
+          IconButton(
+            tooltip: sellerUiText("view_customer_page"),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => ProductDetailScreen(product: product),
+              ),
+            ),
+            icon: const Icon(Icons.visibility_outlined),
+          ),
+          IconButton(
+            tooltip: sellerUiText("edit"),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => SellerProductFormScreen(product: product),
+              ),
+            ),
+            icon: const Icon(Icons.edit_outlined),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: 96),
+        children: [
+          DetailMediaGallery(product: product),
+          CheckoutCard(
+            margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        product.name,
+                        style: const TextStyle(
+                          color: ink,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          height: 1.25,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ProductMiniTag(label: status, filled: active),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  formatBaht(product.price),
+                  style: const TextStyle(
+                    color: accent,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ProductMiniTag(
+                        label: "${sellerUiText("stock")} ${product.stock}"),
+                    ProductMiniTag(
+                        label: "${sellerUiText("sold")} ${product.soldCount}"),
+                    ProductMiniTag(
+                      label:
+                          "${sellerUiText("media")} $mediaCount ${sellerUiText("items")}",
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          CheckoutCard(
+            margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  sellerUiText("product_options"),
+                  style:
+                      const TextStyle(color: ink, fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 10),
+                SellerProductOptionPreview(
+                  title: sellerUiText("color_style"),
+                  options: product.colorOptions,
+                ),
+                SellerProductOptionPreview(
+                  title: sellerUiText("size"),
+                  options: product.sizeOptions,
+                ),
+              ],
+            ),
+          ),
+          CheckoutCard(
+            margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  sellerUiText("details"),
+                  style:
+                      const TextStyle(color: ink, fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  product.description.trim().isEmpty
+                      ? sellerUiText("empty_description")
+                      : product.description,
+                  style: const TextStyle(color: ink, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+          CheckoutCard(
+            margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+            child: Column(
+              children: [
+                SellerProductSpecRow(
+                  label: sellerUiText("category"),
+                  value: product.category,
+                ),
+                SellerProductSpecRow(label: "SKU", value: product.sku),
+                SellerProductSpecRow(
+                  label: sellerUiText("weight"),
+                  value: product.weightKg <= 0
+                      ? "-"
+                      : "${product.weightKg.toStringAsFixed(2)} ${sellerUiText("kg")}",
+                ),
+                SellerProductSpecRow(
+                  label: sellerUiText("parcel_size"),
+                  value: product.parcelSize,
+                ),
+                SellerProductSpecRow(
+                  label: sellerUiText("ships_from"),
+                  value: product.location,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          color: Colors.white,
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ProductDetailScreen(product: product),
+                    ),
+                  ),
+                  icon: const Icon(Icons.visibility_outlined),
+                  label: Text(sellerUiText("view_customer_page")),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => SellerProductFormScreen(product: product),
+                    ),
+                  ),
+                  icon: const Icon(Icons.edit_outlined),
+                  label: Text(sellerUiText("edit")),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: accent,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                onPressed: () => confirmDeleteSellerProduct(
+                  context,
+                  product,
+                  closeCurrentAfterDelete: true,
+                ),
+                icon: const Icon(Icons.delete_outline),
+                tooltip: sellerUiText("delete_product"),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class SellerProductOptionPreview extends StatelessWidget {
+  const SellerProductOptionPreview({
+    super.key,
+    required this.title,
+    required this.options,
+  });
+
+  final String title;
+  final List<String> options;
+
+  @override
+  Widget build(BuildContext context) {
+    if (options.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(color: muted, fontSize: 12)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children:
+                options.map((option) => ProductMiniTag(label: option)).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SellerProductSpecRow extends StatelessWidget {
+  const SellerProductSpecRow({
+    super.key,
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(
+              label,
+              style: const TextStyle(color: muted, fontSize: 12.5),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value.trim().isEmpty ? "-" : value,
+              style: const TextStyle(color: ink, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class SellerProductRow extends StatelessWidget {
   const SellerProductRow({super.key, required this.product});
 
@@ -8570,29 +9251,43 @@ class SellerProductRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        children: [
-          ProductThumb(url: product.imageUrl, size: 58),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(product.name,
+    final statusCode = appStore.sellerProductStatusCode(product);
+    return InkWell(
+      onTap: () => openSellerProductDetail(context, product),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(
+          children: [
+            ProductThumb(url: product.imageUrl, size: 58),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    product.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        color: ink, fontWeight: FontWeight.w800)),
-                const SizedBox(height: 3),
-                Text('${formatBaht(product.price)} · คลัง ${product.stock}',
-                    style: const TextStyle(color: muted, fontSize: 12)),
-              ],
+                      color: ink,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    "${formatBaht(product.price)} - ${sellerUiText("stock")} ${product.stock}",
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  ),
+                ],
+              ),
             ),
-          ),
-          const ProductMiniTag(label: 'เปิดขาย', filled: true),
-        ],
+            ProductMiniTag(
+              label: appStore.sellerProductStatus(product),
+              filled: statusCode == "active",
+            ),
+            const Icon(Icons.chevron_right, color: muted),
+          ],
+        ),
       ),
     );
   }
@@ -8606,7 +9301,8 @@ class SellerProductManageRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = appStore.sellerProductStatus(product);
-    final active = status == 'กำลังขาย';
+    final statusCode = appStore.sellerProductStatusCode(product);
+    final active = statusCode == "active";
     return Column(
       children: [
         Row(
@@ -8628,12 +9324,12 @@ class SellerProductManageRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    '${formatBaht(product.price)} · คลัง ${product.stock}',
+                    "${formatBaht(product.price)} - ${sellerUiText("stock")} ${product.stock}",
                     style: const TextStyle(color: muted, fontSize: 12),
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    'ขายแล้ว ${product.soldCount} · ${product.location}',
+                    "${sellerUiText("sold")} ${product.soldCount} - ${product.location}",
                     style: const TextStyle(color: muted, fontSize: 11.5),
                   ),
                 ],
@@ -8647,6 +9343,18 @@ class SellerProductManageRow extends StatelessWidget {
           children: [
             Expanded(
               child: OutlinedButton(
+                onPressed: () => openSellerProductDetail(context, product),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: accent,
+                  side: const BorderSide(color: line),
+                  visualDensity: VisualDensity.compact,
+                ),
+                child: Text(sellerUiText("view")),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (_) => SellerProductFormScreen(product: product),
@@ -8657,7 +9365,7 @@ class SellerProductManageRow extends StatelessWidget {
                   side: const BorderSide(color: line),
                   visualDensity: VisualDensity.compact,
                 ),
-                child: const Text('แก้ไข'),
+                child: Text(sellerUiText("edit")),
               ),
             ),
             const SizedBox(width: 8),
@@ -8665,28 +9373,30 @@ class SellerProductManageRow extends StatelessWidget {
               child: OutlinedButton(
                 onPressed: () => appStore.updateSellerProductStatus(
                   product,
-                  active ? 'ปิดการขาย' : 'กำลังขาย',
+                  active ? "hidden" : "active",
                 ),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: accent,
                   side: const BorderSide(color: line),
                   visualDensity: VisualDensity.compact,
                 ),
-                child: Text(active ? 'ปิดการขาย' : 'เปิดขาย'),
+                child: Text(
+                  active
+                      ? sellerUiText("close_sale")
+                      : sellerUiText("open_sale"),
+                ),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: OutlinedButton(
-                onPressed: () async {
-                  await appStore.deleteSellerProduct(product);
-                },
+                onPressed: () => confirmDeleteSellerProduct(context, product),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: muted,
                   side: const BorderSide(color: line),
                   visualDensity: VisualDensity.compact,
                 ),
-                child: const Text('ลบ'),
+                child: Text(sellerUiText("delete")),
               ),
             ),
           ],
@@ -9516,12 +10226,21 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
   final shipFrom = TextEditingController();
   final colors = TextEditingController();
   final sizes = TextEditingController();
+  final attributes = TextEditingController();
   final description = TextEditingController();
-  String imageFileName = '';
-  String videoFileName = '';
+  String sizeChartFileName = '';
+  List<ProductMediaItem> mediaItems = [];
+  List<String> galleryImageUrls = [];
+  List<String> detailImageUrls = [];
+  List<String> colorRows = [''];
+  List<String> sizeRows = ['S', 'M', 'L'];
+  final Map<String, String> variantImageUrls = {};
+  final Set<String> uploadingVariantOptions = {};
+  String productStatus = 'active';
   bool isSaving = false;
   bool isUploadingImage = false;
-  bool isUploadingVideo = false;
+  bool isUploadingSizeChart = false;
+  bool isUploadingDetailImages = false;
 
   @override
   void initState() {
@@ -9535,11 +10254,47 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
         .toStringAsFixed(product.originalPrice % 1 == 0 ? 0 : 2);
     stock.text = product.stock.toString();
     imageUrl.text = product.imageUrl;
+    mediaItems = product.mediaItems.isNotEmpty
+        ? List<ProductMediaItem>.from(product.mediaItems)
+        : [
+            if (product.videoUrl.trim().isNotEmpty)
+              ProductMediaItem(type: 'video', url: product.videoUrl),
+            for (final url in product.galleryImageUrls.isNotEmpty
+                ? product.galleryImageUrls
+                : product.imageUrl.trim().isEmpty
+                    ? <String>[]
+                    : <String>[product.imageUrl])
+              ProductMediaItem(type: 'image', url: url),
+          ];
+    galleryImageUrls = product.galleryImageUrls.isNotEmpty
+        ? List<String>.from(product.galleryImageUrls)
+        : product.imageUrl.trim().isEmpty
+            ? <String>[]
+            : <String>[product.imageUrl];
     videoUrl.text = product.videoUrl;
     sizeChartUrl.text = product.sizeChartImageUrl ?? '';
+    sku.text = product.sku;
+    weight.text =
+        product.weightKg <= 0 ? '' : product.weightKg.toStringAsFixed(2);
+    parcelSize.text = product.parcelSize;
     shipFrom.text = product.location;
     colors.text = product.colorOptions.join(', ');
     sizes.text = product.sizeOptions.join(', ');
+    attributes.text = productAttributesText(product.attributes);
+    detailImageUrls = List<String>.from(product.detailImageUrls);
+    colorRows = product.colorOptions.isEmpty
+        ? ['']
+        : List<String>.from(product.colorOptions);
+    sizeRows = product.sizeOptions.isEmpty
+        ? ['']
+        : List<String>.from(product.sizeOptions);
+    description.text = product.description;
+    variantImageUrls.addAll(product.variantImageUrls);
+    productStatus = sellerProductStatusLabels.containsKey(product.status)
+        ? product.status
+        : product.stock <= 0
+            ? 'sold_out'
+            : 'active';
   }
 
   @override
@@ -9558,50 +10313,193 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
     shipFrom.dispose();
     colors.dispose();
     sizes.dispose();
+    attributes.dispose();
     description.dispose();
     super.dispose();
   }
 
-  Future<void> _pickProductMedia(String kind) async {
+  List<String> _activeColorRows() {
+    return uniqueStrings(colorRows.where((item) => item.trim().isNotEmpty));
+  }
+
+  void _syncColorText() {
+    colors.text = _activeColorRows().join(', ');
+  }
+
+  void _updateColorRow(int index, String value) {
+    if (index < 0 || index >= colorRows.length) return;
+    setState(() {
+      final previous = colorRows[index].trim();
+      final next = value.trim();
+      colorRows[index] = value;
+      if (previous.isNotEmpty && previous != next) {
+        final previousImage =
+            variantImageUrls.remove(variantImageKey('color', previous));
+        if (next.isNotEmpty && previousImage != null) {
+          variantImageUrls[variantImageKey('color', next)] = previousImage;
+        }
+      }
+      _syncColorText();
+    });
+  }
+
+  void _addColorRow() {
+    setState(() {
+      colorRows.add('');
+      _syncColorText();
+    });
+  }
+
+  void _removeColorRow(int index) {
+    if (index < 0 || index >= colorRows.length) return;
+    setState(() {
+      final removed = colorRows.removeAt(index).trim();
+      if (removed.isNotEmpty) {
+        variantImageUrls.remove(variantImageKey('color', removed));
+      }
+      if (colorRows.isEmpty) colorRows.add('');
+      _syncColorText();
+    });
+  }
+
+  List<String> _activeSizeRows() {
+    return uniqueStrings(sizeRows.where((item) => item.trim().isNotEmpty));
+  }
+
+  void _syncSizeText() {
+    sizes.text = _activeSizeRows().join(', ');
+  }
+
+  void _updateSizeRow(int index, String value) {
+    if (index < 0 || index >= sizeRows.length) return;
+    setState(() {
+      final previous = sizeRows[index].trim();
+      final next = value.trim();
+      sizeRows[index] = value;
+      if (previous.isNotEmpty && previous != next) {
+        final previousImage =
+            variantImageUrls.remove(variantImageKey('size', previous));
+        if (next.isNotEmpty && previousImage != null) {
+          variantImageUrls[variantImageKey('size', next)] = previousImage;
+        }
+      }
+      _syncSizeText();
+    });
+  }
+
+  void _addSizeRow() {
+    setState(() {
+      sizeRows.add('');
+      _syncSizeText();
+    });
+  }
+
+  void _removeSizeRow(int index) {
+    if (index < 0 || index >= sizeRows.length) return;
+    setState(() {
+      final removed = sizeRows.removeAt(index).trim();
+      if (removed.isNotEmpty) {
+        variantImageUrls.remove(variantImageKey('size', removed));
+      }
+      if (sizeRows.isEmpty) sizeRows.add('');
+      _syncSizeText();
+    });
+  }
+
+  void _syncMediaFields() {
+    galleryImageUrls = mediaItems
+        .where((item) => item.isImage)
+        .map((item) => item.url)
+        .toList(growable: false);
+    final imageItems = mediaItems.where((item) => item.isImage).toList();
+    final videoItems = mediaItems.where((item) => item.isVideo).toList();
+    final firstImage = imageItems.isEmpty ? null : imageItems.first.url;
+    final firstVideo = videoItems.isEmpty ? null : videoItems.first.url;
+    imageUrl.text = firstImage ?? '';
+    videoUrl.text = firstVideo ?? '';
+  }
+
+  void _setCoverImage(int index) {
+    if (index < 0 || index >= mediaItems.length) return;
+    setState(() {
+      final selectedItem = mediaItems.removeAt(index);
+      mediaItems.insert(0, selectedItem);
+      _syncMediaFields();
+    });
+  }
+
+  void _removeGalleryImage(int index) {
+    if (index < 0 || index >= mediaItems.length) return;
+    setState(() {
+      mediaItems.removeAt(index);
+      _syncMediaFields();
+    });
+  }
+
+  bool _isVideoFile(String fileName) {
+    final lower = fileName.toLowerCase();
+    return lower.endsWith('.mp4') ||
+        lower.endsWith('.mov') ||
+        lower.endsWith('.webm');
+  }
+
+  Future<void> _pickProductMedia() async {
     final seller = appStore.sellerProfile;
     if (seller == null || !seller.isVerified) {
       showSellerApprovalPending(context);
       return;
     }
-    final isVideo = kind == 'video';
-    setState(() {
-      if (isVideo) {
-        isUploadingVideo = true;
-      } else {
-        isUploadingImage = true;
-      }
-    });
+    setState(() => isUploadingImage = true);
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: isVideo
-            ? const ['mp4', 'mov', 'webm']
-            : const ['jpg', 'jpeg', 'png', 'webp', 'heic'],
+        allowedExtensions: const [
+          'jpg',
+          'jpeg',
+          'png',
+          'webp',
+          'heic',
+          'mp4',
+          'mov',
+          'webm',
+        ],
+        allowMultiple: true,
         withData: true,
       );
-      final file = result?.files.single;
-      final bytes = file?.bytes;
-      if (file == null || bytes == null) return;
-      final url = await appStore.uploadProductMedia(
-        shopId: seller.id,
-        kind: kind,
-        fileName: file.name,
-        bytes: bytes,
-      );
+      final files = result?.files ?? const [];
+      if (files.isEmpty) return;
       if (!mounted) return;
+      final remainingSlots = 20 - mediaItems.length;
+      if (remainingSlots <= 0) return;
+      final nextFiles = files.take(remainingSlots);
+      final uploadedItems = <ProductMediaItem>[];
+      for (final file in nextFiles) {
+        final bytes = file.bytes;
+        if (bytes == null) continue;
+        final isVideo = _isVideoFile(file.name);
+        final url = await appStore.uploadProductMedia(
+          shopId: seller.id,
+          kind: isVideo ? 'video' : 'image',
+          fileName: file.name,
+          bytes: bytes,
+        );
+        uploadedItems.add(
+          ProductMediaItem(type: isVideo ? 'video' : 'image', url: url),
+        );
+      }
+      if (!mounted || uploadedItems.isEmpty) return;
       setState(() {
-        if (isVideo) {
-          videoUrl.text = url;
-          videoFileName = file.name;
-        } else {
-          imageUrl.text = url;
-          imageFileName = file.name;
+        for (final item in uploadedItems) {
+          if (item.isVideo) mediaItems.removeWhere((media) => media.isVideo);
+          if (!mediaItems.any((media) => media.url == item.url)) {
+            mediaItems.add(item);
+          }
         }
+        _syncMediaFields();
+        galleryImageUrls = mediaItems
+            .where((item) => item.isImage)
+            .map((item) => item.url)
+            .toList(growable: false);
       });
     } catch (error) {
       if (!mounted) return;
@@ -9609,14 +10507,129 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
         SnackBar(content: Text('แนบไฟล์ไม่สำเร็จ: $error')),
       );
     } finally {
+      if (mounted) setState(() => isUploadingImage = false);
+    }
+  }
+
+  Future<void> _pickSizeChartImage() async {
+    final seller = appStore.sellerProfile;
+    if (seller == null || !seller.isVerified) {
+      showSellerApprovalPending(context);
+      return;
+    }
+    setState(() => isUploadingSizeChart = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'heic'],
+        withData: true,
+      );
+      final file = result?.files.single;
+      final bytes = file?.bytes;
+      if (file == null || bytes == null) return;
+      final url = await appStore.uploadProductMedia(
+        shopId: seller.id,
+        kind: 'image',
+        fileName: file.name,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      setState(() {
+        sizeChartUrl.text = url;
+        sizeChartFileName = file.name;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('แนบรูปตารางไซส์ไม่สำเร็จ: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isUploadingSizeChart = false);
+    }
+  }
+
+  Future<void> _pickDetailImages() async {
+    final seller = appStore.sellerProfile;
+    if (seller == null || !seller.isVerified) {
+      showSellerApprovalPending(context);
+      return;
+    }
+    setState(() => isUploadingDetailImages = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'heic'],
+        allowMultiple: true,
+        withData: true,
+      );
+      final files = result?.files ?? const [];
+      if (files.isEmpty) return;
+      final uploadedUrls = <String>[];
+      for (final file in files) {
+        final bytes = file.bytes;
+        if (bytes == null) continue;
+        final url = await appStore.uploadProductMedia(
+          shopId: seller.id,
+          kind: 'detail',
+          fileName: file.name,
+          bytes: bytes,
+        );
+        uploadedUrls.add(url);
+      }
+      if (!mounted || uploadedUrls.isEmpty) return;
+      setState(() {
+        for (final url in uploadedUrls) {
+          if (!detailImageUrls.contains(url)) detailImageUrls.add(url);
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Upload detail images failed: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isUploadingDetailImages = false);
+    }
+  }
+
+  void _removeDetailImage(int index) {
+    if (index < 0 || index >= detailImageUrls.length) return;
+    setState(() => detailImageUrls.removeAt(index));
+  }
+
+  Future<void> _pickVariantImage(String optionType, String option) async {
+    final seller = appStore.sellerProfile;
+    if (seller == null || !seller.isVerified) {
+      showSellerApprovalPending(context);
+      return;
+    }
+    final key = variantImageKey(optionType, option);
+    setState(() => uploadingVariantOptions.add(key));
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'heic'],
+        withData: true,
+      );
+      final file = result?.files.single;
+      final bytes = file?.bytes;
+      if (file == null || bytes == null) return;
+      final url = await appStore.uploadProductMedia(
+        shopId: seller.id,
+        kind: 'image',
+        fileName: file.name,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      setState(() => variantImageUrls[key] = url);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('แนบรูปของ $option ไม่สำเร็จ: $error')),
+      );
+    } finally {
       if (mounted) {
-        setState(() {
-          if (isVideo) {
-            isUploadingVideo = false;
-          } else {
-            isUploadingImage = false;
-          }
-        });
+        setState(() => uploadingVariantOptions.remove(key));
       }
     }
   }
@@ -9635,21 +10648,61 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
       final parsedOriginal =
           double.tryParse(originalPrice.text.trim()) ?? parsedPrice;
       final parsedStock = int.tryParse(stock.text.trim()) ?? 0;
+      final selectedMediaItems = mediaItems
+          .where((item) => item.url.trim().isNotEmpty)
+          .toList(growable: false);
+      final selectedGallery = uniqueStrings(
+        selectedMediaItems
+            .where((item) => item.isImage)
+            .map((item) => item.url),
+      );
+      final selectedVideos =
+          selectedMediaItems.where((item) => item.isVideo).toList();
+      final selectedVideo =
+          selectedVideos.isEmpty ? '' : selectedVideos.first.url;
+      final colorOptions = _activeColorRows();
+      final sizeOptions = _activeSizeRows();
+      final imageRequiredOptions = colorOptions.isNotEmpty
+          ? colorOptions.map((option) => variantImageKey('color', option))
+          : sizeOptions.map((option) => variantImageKey('size', option));
+      final missingVariantImages = imageRequiredOptions.any(
+        (key) => (variantImageUrls[key] ?? '').trim().isEmpty,
+      );
+      final requiresPublishReady = productStatus == 'active';
+      final blocksPublishByVariantImages =
+          requiresPublishReady && missingVariantImages;
       final missingRequired = name.text.trim().isEmpty ||
           category.text.trim().isEmpty ||
           parsedPrice <= 0 ||
-          parsedStock <= 0 ||
-          imageUrl.text.trim().isEmpty ||
-          shipFrom.text.trim().isEmpty;
+          description.text.trim().isEmpty ||
+          (requiresPublishReady &&
+              (parsedStock <= 0 ||
+                  selectedMediaItems.isEmpty ||
+                  missingVariantImages ||
+                  shipFrom.text.trim().isEmpty));
       if (missingRequired) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('กรุณากรอกข้อมูลสินค้าที่จำเป็นให้ครบ')),
+          SnackBar(
+            content: Text(
+              blocksPublishByVariantImages
+                  ? 'กรุณาเพิ่มรูปให้ครบทุกตัวเลือกสินค้า'
+                  : 'กรุณากรอกข้อมูลสินค้าที่จำเป็นให้ครบ',
+            ),
+          ),
         );
         return;
       }
       final discount = parsedOriginal > parsedPrice && parsedOriginal > 0
           ? (((parsedOriginal - parsedPrice) / parsedOriginal) * 100).round()
           : 0;
+      final selectedVariantImages = <String, String>{};
+      for (final entry in variantImageUrls.entries) {
+        if (entry.key.trim().isNotEmpty && entry.value.trim().isNotEmpty) {
+          selectedVariantImages[entry.key] = entry.value;
+        }
+      }
+      final selectedAttributes = parseProductAttributes(attributes.text);
+      final selectedDetailImages = uniqueStrings(detailImageUrls);
       setState(() => isSaving = true);
       final product = Product(
         id: widget.product?.id ??
@@ -9662,21 +10715,31 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
         originalPrice: parsedOriginal <= 0 ? parsedPrice : parsedOriginal,
         rating: widget.product?.rating ?? 0,
         soldCount: widget.product?.soldCount ?? 0,
-        imageUrl: imageUrl.text.trim(),
+        imageUrl: selectedGallery.isEmpty ? '' : selectedGallery.first,
         badge: '',
         location: shipFrom.text.trim(),
         shippingLabel: 'ส่งฟรี',
         serviceLabel: seller.shopName,
         promoLabel: '',
         discountPercent: discount,
-        isVideo: videoUrl.text.trim().isNotEmpty,
-        videoViews: videoUrl.text.trim().isEmpty ? '' : 'ใหม่',
-        videoUrl: videoUrl.text.trim(),
+        isVideo: selectedVideo.isNotEmpty,
+        videoViews: selectedVideo.isEmpty ? '' : 'ใหม่',
+        videoUrl: selectedVideo,
         stock: parsedStock,
-        colorOptions: splitOptions(colors.text),
-        sizeOptions: splitOptions(sizes.text),
+        description: description.text.trim(),
+        sku: sku.text.trim(),
+        weightKg: double.tryParse(weight.text.trim()) ?? 0,
+        parcelSize: parcelSize.text.trim(),
+        status: productStatus,
+        mediaItems: selectedMediaItems,
+        galleryImageUrls: selectedGallery,
+        variantImageUrls: selectedVariantImages,
+        colorOptions: colorOptions,
+        sizeOptions: sizeOptions,
         sizeChartImageUrl:
             sizeChartUrl.text.trim().isEmpty ? null : sizeChartUrl.text.trim(),
+        attributes: selectedAttributes,
+        detailImageUrls: selectedDetailImages,
       );
       try {
         if (widget.product == null) {
@@ -9712,7 +10775,7 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
-        title: const Text('เพิ่มสินค้า'),
+        title: Text(widget.product == null ? 'เพิ่มสินค้า' : 'แก้ไขสินค้า'),
         backgroundColor: Colors.white,
         foregroundColor: ink,
         elevation: 0,
@@ -9730,20 +10793,12 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
           SellerMediaSection(
             imageUrl: imageUrl,
             videoUrl: videoUrl,
-            imageFileName: imageFileName,
-            videoFileName: videoFileName,
+            mediaItems: mediaItems,
             isUploadingImage: isUploadingImage,
-            isUploadingVideo: isUploadingVideo,
-            onPickImage: () => _pickProductMedia('image'),
-            onPickVideo: () => _pickProductMedia('video'),
-            onClearImage: () => setState(() {
-              imageUrl.clear();
-              imageFileName = '';
-            }),
-            onClearVideo: () => setState(() {
-              videoUrl.clear();
-              videoFileName = '';
-            }),
+            onPickImage: _pickProductMedia,
+            onSetCoverImage: _setCoverImage,
+            onRemoveImage: _removeGalleryImage,
+            onClearImage: () => _removeGalleryImage(0),
           ),
           SellerEditSection(
             children: [
@@ -9760,11 +10815,24 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
                 required: true,
                 maxLines: 3,
               ),
+              SellerInlineTextField(
+                controller: attributes,
+                label: sellerUiText("product_attributes"),
+                hint: sellerUiText("product_attributes_hint"),
+                maxLines: 5,
+              ),
             ],
+          ),
+          SellerDetailImagesSection(
+            imageUrls: detailImageUrls,
+            loading: isUploadingDetailImages,
+            onPick: _pickDetailImages,
+            onRemove: _removeDetailImage,
           ),
           SellerEditSection(
             children: [
-              DropdownButtonFormField<String>(`r`n                initialValue: shopeeProductCategories.contains(category.text)
+              DropdownButtonFormField<String>(
+                initialValue: shopeeProductCategories.contains(category.text)
                     ? category.text
                     : null,
                 items: shopeeProductCategories
@@ -9786,6 +10854,54 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
                   fillColor: Color(0xFFF6F6F6),
                   border: InputBorder.none,
                 ),
+              ),
+            ],
+          ),
+          SellerEditSection(
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue:
+                    sellerProductStatusLabels.containsKey(productStatus)
+                        ? productStatus
+                        : 'active',
+                items: const [
+                  DropdownMenuItem(
+                    value: 'active',
+                    child: Text('เปิดขายทันที'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'draft',
+                    child: Text('บันทึกแบบร่าง'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'hidden',
+                    child: Text('ปิดการขาย'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'sold_out',
+                    child: Text('หมดสต๊อก'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'suspended',
+                    child: Text('ระงับสินค้า'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => productStatus = value);
+                },
+                decoration: const InputDecoration(
+                  labelText: 'สถานะการลงขาย',
+                  prefixIcon: Icon(Icons.sell_outlined),
+                  filled: true,
+                  fillColor: Color(0xFFF6F6F6),
+                  border: InputBorder.none,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'เปิดขายทันทีต้องมีรูปสินค้า ราคา สต๊อก จังหวัดต้นทาง และรายละเอียดครบ',
+                style: TextStyle(color: muted, fontSize: 12.5, height: 1.35),
               ),
             ],
           ),
@@ -9826,23 +10942,67 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
             children: [
               SellerFieldGrid(
                 children: [
-                  SellerCompactFormField(
-                    controller: colors,
-                    label: 'สี',
-                    hint: 'ขาว, ดำ, เทา',
+                  SellerCompactInfoTile(
+                    icon: Icons.palette_outlined,
+                    label: 'สี/แบบ',
+                    value: '${_activeColorRows().length} ตัวเลือก',
                   ),
-                  SellerCompactFormField(
-                    controller: sizes,
-                    label: 'ไซส์',
-                    hint: 'S, M, L, XL',
+                  SellerCompactInfoTile(
+                    icon: Icons.straighten,
+                    label: 'ขนาด',
+                    value: '${_activeSizeRows().length} ตัวเลือก',
                   ),
                 ],
               ),
-              SellerInlineTextField(
-                controller: sizeChartUrl,
-                label: 'ตารางขนาดสินค้า',
-                hint: 'ลิงก์รูปตารางไซส์ ถ้ามี',
-                keyboardType: TextInputType.url,
+              SellerVariantOptionRows(
+                title: 'สี/แบบสินค้า',
+                helperText:
+                    'เหมือน Shopee: เพิ่มรูปประจำสีหรือแบบสินค้าเอง รูปนี้จะขึ้นในแถวตัวเลือกและใช้เมื่อกดเลือก',
+                optionType: 'color',
+                fieldLabel: 'สี/แบบ',
+                addLabel: '+ สี/แบบ',
+                imagePrefix: 'เพิ่มรูป',
+                options: colorRows,
+                variantImageUrls: variantImageUrls,
+                uploadingOptions: uploadingVariantOptions,
+                requireImages: true,
+                onOptionChanged: _updateColorRow,
+                onAddOption: _addColorRow,
+                onRemoveOption: _removeColorRow,
+                onPickImage: _pickVariantImage,
+                onClearImage: (option) => setState(() =>
+                    variantImageUrls.remove(variantImageKey('color', option))),
+              ),
+              SellerVariantOptionRows(
+                title: 'ขนาด',
+                helperText:
+                    'ตั้งชื่อขนาดเองได้ เช่น Baby, Junior, Adult, ใหญ่ 40cm, เด็ก 30cm หรือแพ็ค 10 ชิ้น ถ้าต้องการรูปเฉพาะขนาดให้กดเพิ่มรูปในแถวนั้น',
+                optionType: 'size',
+                fieldLabel: 'ขนาด',
+                addLabel: '+ ขนาด',
+                imagePrefix: 'เพิ่มรูป',
+                options: sizeRows,
+                variantImageUrls: variantImageUrls,
+                uploadingOptions: uploadingVariantOptions,
+                requireImages: _activeColorRows().isEmpty,
+                onOptionChanged: _updateSizeRow,
+                onAddOption: _addSizeRow,
+                onRemoveOption: _removeSizeRow,
+                onPickImage: _pickVariantImage,
+                onClearImage: (option) => setState(() =>
+                    variantImageUrls.remove(variantImageKey('size', option))),
+              ),
+              SellerSizeChartPicker(
+                imageUrl: sizeChartUrl.text,
+                fileName: sizeChartFileName,
+                loading: isUploadingSizeChart,
+                onPick: _pickSizeChartImage,
+                onClear: sizeChartUrl.text.trim().isEmpty
+                    ? null
+                    : () => setState(() {
+                          sizeChartUrl.clear();
+                          sizeChartFileName = '';
+                        }),
               ),
             ],
           ),
@@ -9899,7 +11059,9 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(7)),
             ),
-            child: const Text('บันทึกและเปิดขาย'),
+            child: Text(
+              productStatus == 'active' ? 'บันทึกและเปิดขาย' : 'บันทึกสินค้า',
+            ),
           ),
         ),
       ),
@@ -9912,26 +11074,22 @@ class SellerMediaSection extends StatelessWidget {
     super.key,
     required this.imageUrl,
     required this.videoUrl,
-    required this.imageFileName,
-    required this.videoFileName,
+    required this.mediaItems,
     required this.isUploadingImage,
-    required this.isUploadingVideo,
     required this.onPickImage,
-    required this.onPickVideo,
+    required this.onSetCoverImage,
+    required this.onRemoveImage,
     required this.onClearImage,
-    required this.onClearVideo,
   });
 
   final TextEditingController imageUrl;
   final TextEditingController videoUrl;
-  final String imageFileName;
-  final String videoFileName;
+  final List<ProductMediaItem> mediaItems;
   final bool isUploadingImage;
-  final bool isUploadingVideo;
   final VoidCallback onPickImage;
-  final VoidCallback onPickVideo;
+  final ValueChanged<int> onSetCoverImage;
+  final ValueChanged<int> onRemoveImage;
   final VoidCallback onClearImage;
-  final VoidCallback onClearVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -9943,26 +11101,48 @@ class SellerMediaSection extends StatelessWidget {
         children: [
           Row(
             children: [
-              SellerMediaTile(
-                label: 'ภาพปก',
-                imageUrl: imageUrl.text,
-                fileName: imageFileName,
-                loading: isUploadingImage,
-                onTap: onPickImage,
-                onClear: imageUrl.text.trim().isEmpty ? null : onClearImage,
-              ),
-              const SizedBox(width: 10),
-              SellerMediaTile(
-                label: 'วิดีโอ',
-                icon: Icons.play_circle_outline,
-                fileName: videoFileName,
-                loading: isUploadingVideo,
-                onTap: onPickVideo,
-                onClear: videoUrl.text.trim().isEmpty ? null : onClearVideo,
+              Expanded(
+                child: SizedBox(
+                  height: 82,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: mediaItems.length + 1,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (context, index) {
+                      if (index == mediaItems.length) {
+                        return SellerMediaTile(
+                          label: 'เพิ่มสื่อ',
+                          loading: isUploadingImage,
+                          onTap: onPickImage,
+                        );
+                      }
+                      final item = mediaItems[index];
+                      return SellerMediaTile(
+                        label: index == 0
+                            ? 'สื่อแรก'
+                            : item.isVideo
+                                ? 'วิดีโอ'
+                                : 'รูป ${index + 1}',
+                        imageUrl: item.isImage ? item.url : null,
+                        icon: item.isVideo
+                            ? Icons.play_circle_outline
+                            : Icons.image_outlined,
+                        fileName: '',
+                        onTap: () => onSetCoverImage(index),
+                        onClear: () => onRemoveImage(index),
+                      );
+                    },
+                  ),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 12),
+          Text(
+            'สื่อแรกคือสิ่งที่ลูกค้าเห็นก่อน จะเป็นวิดีโอหรือรูปก็ได้ เพิ่มสื่อได้สูงสุด 20 รายการ',
+            style: const TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+          ),
+          const SizedBox(height: 8),
           SellerCompactUrlField(
             controller: imageUrl,
             label: 'URL รูปปกสินค้า',
@@ -9971,6 +11151,72 @@ class SellerMediaSection extends StatelessWidget {
           SellerCompactUrlField(
             controller: videoUrl,
             label: 'URL วิดีโอสินค้า ถ้ามี',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SellerDetailImagesSection extends StatelessWidget {
+  const SellerDetailImagesSection({
+    super.key,
+    required this.imageUrls,
+    required this.loading,
+    required this.onPick,
+    required this.onRemove,
+  });
+
+  final List<String> imageUrls;
+  final bool loading;
+  final VoidCallback onPick;
+  final ValueChanged<int> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            sellerUiText("detail_images"),
+            style: const TextStyle(
+              color: ink,
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            sellerUiText("detail_image_helper"),
+            style: const TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 82,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: imageUrls.length + 1,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                if (index == imageUrls.length) {
+                  return SellerMediaTile(
+                    label: sellerUiText("add_detail_image"),
+                    loading: loading,
+                    onTap: onPick,
+                  );
+                }
+                return SellerMediaTile(
+                  label: '${index + 1}',
+                  imageUrl: imageUrls[index],
+                  icon: Icons.image_outlined,
+                  onClear: () => onRemove(index),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -10091,6 +11337,242 @@ class SellerMediaTile extends StatelessWidget {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class SellerVariantOptionRows extends StatelessWidget {
+  const SellerVariantOptionRows({
+    super.key,
+    required this.title,
+    required this.helperText,
+    required this.optionType,
+    required this.fieldLabel,
+    required this.addLabel,
+    required this.imagePrefix,
+    required this.options,
+    required this.variantImageUrls,
+    required this.uploadingOptions,
+    required this.requireImages,
+    required this.onOptionChanged,
+    required this.onAddOption,
+    required this.onRemoveOption,
+    required this.onPickImage,
+    required this.onClearImage,
+  });
+
+  final String title;
+  final String helperText;
+  final String optionType;
+  final String fieldLabel;
+  final String addLabel;
+  final String imagePrefix;
+  final List<String> options;
+  final Map<String, String> variantImageUrls;
+  final Set<String> uploadingOptions;
+  final bool requireImages;
+  final void Function(int index, String value) onOptionChanged;
+  final VoidCallback onAddOption;
+  final ValueChanged<int> onRemoveOption;
+  final void Function(String optionType, String option) onPickImage;
+  final ValueChanged<String> onClearImage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(color: ink, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            helperText,
+            style: TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+          ),
+          const SizedBox(height: 10),
+          for (var i = 0; i < options.length; i++) ...[
+            _SellerVariantOptionRow(
+              index: i,
+              optionType: optionType,
+              optionValue: options[i],
+              fieldLabel: fieldLabel,
+              imagePrefix: imagePrefix,
+              imageUrl: variantImageUrlForOption(
+                optionType: optionType,
+                optionValue: options[i],
+                images: variantImageUrls,
+              ),
+              loading: uploadingOptions.contains(
+                variantImageKey(optionType, options[i].trim()),
+              ),
+              canRemove: options.length > 1,
+              requireImage: requireImages,
+              onOptionChanged: onOptionChanged,
+              onRemoveOption: onRemoveOption,
+              onPickImage: onPickImage,
+              onClearImage: onClearImage,
+            ),
+            const SizedBox(height: 10),
+          ],
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: onAddOption,
+              icon: const Icon(Icons.add, size: 18),
+              label: Text(addLabel),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: accent,
+                side: const BorderSide(color: accent),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SellerVariantOptionRow extends StatelessWidget {
+  const _SellerVariantOptionRow({
+    required this.index,
+    required this.optionType,
+    required this.optionValue,
+    required this.fieldLabel,
+    required this.imagePrefix,
+    required this.imageUrl,
+    required this.loading,
+    required this.canRemove,
+    required this.requireImage,
+    required this.onOptionChanged,
+    required this.onRemoveOption,
+    required this.onPickImage,
+    required this.onClearImage,
+  });
+
+  final int index;
+  final String optionType;
+  final String optionValue;
+  final String fieldLabel;
+  final String imagePrefix;
+  final String imageUrl;
+  final bool loading;
+  final bool canRemove;
+  final bool requireImage;
+  final void Function(int index, String value) onOptionChanged;
+  final ValueChanged<int> onRemoveOption;
+  final void Function(String optionType, String option) onPickImage;
+  final ValueChanged<String> onClearImage;
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmedOption = optionValue.trim();
+    final label =
+        trimmedOption.isEmpty ? imagePrefix : '$imagePrefix $trimmedOption';
+    final missingImage = requireImage && imageUrl.trim().isEmpty;
+    return Row(
+      children: [
+        SellerMediaTile(
+          label: label,
+          imageUrl: imageUrl.trim().isEmpty ? null : imageUrl,
+          loading: loading,
+          onTap: trimmedOption.isEmpty
+              ? null
+              : () => onPickImage(optionType, trimmedOption),
+          onClear: imageUrl.trim().isEmpty
+              ? null
+              : () => onClearImage(trimmedOption),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextFormField(
+                initialValue: optionValue,
+                onChanged: (value) => onOptionChanged(index, value),
+                decoration: InputDecoration(
+                  labelText: fieldLabel,
+                  hintText: fieldLabel,
+                  filled: true,
+                  fillColor: Color(0xFFF6F6F6),
+                  border: InputBorder.none,
+                ),
+              ),
+              if (missingImage) ...[
+                const SizedBox(height: 3),
+                const Text(
+                  'ต้องเพิ่มรูปตัวเลือกนี้ก่อนเปิดขาย',
+                  style: TextStyle(color: accent, fontSize: 11.5),
+                ),
+              ],
+            ],
+          ),
+        ),
+        IconButton(
+          onPressed: canRemove ? () => onRemoveOption(index) : null,
+          icon: const Icon(Icons.close, color: muted),
+          tooltip: 'ลบตัวเลือก',
+        ),
+      ],
+    );
+  }
+}
+
+class SellerSizeChartPicker extends StatelessWidget {
+  const SellerSizeChartPicker({
+    super.key,
+    required this.imageUrl,
+    required this.fileName,
+    required this.loading,
+    required this.onPick,
+    this.onClear,
+  });
+
+  final String imageUrl;
+  final String fileName;
+  final bool loading;
+  final VoidCallback onPick;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasImage = imageUrl.trim().isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: Row(
+        children: [
+          SellerMediaTile(
+            label: 'ตารางไซส์',
+            imageUrl: hasImage ? imageUrl : null,
+            fileName: fileName,
+            loading: loading,
+            onTap: onPick,
+            onClear: onClear,
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'ตารางขนาดสินค้า',
+                  style: TextStyle(color: ink, fontWeight: FontWeight.w900),
+                ),
+                SizedBox(height: 3),
+                Text(
+                  'อัปโหลดรูปตารางไซส์ ถ้ามี ระบบจะแสดงในหน้ารายละเอียดสินค้า',
+                  style: TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -10772,6 +12254,84 @@ List<String> splitOptions(String value) {
       .map((item) => item.trim())
       .where((item) => item.isNotEmpty)
       .toList(growable: false);
+}
+
+List<String> uniqueStrings(Iterable<String> values) {
+  final result = <String>[];
+  for (final value in values) {
+    final text = value.trim();
+    if (text.isNotEmpty && !result.contains(text)) result.add(text);
+  }
+  return result;
+}
+
+String variantImageKey(String optionType, String optionValue) {
+  return '$optionType::${optionValue.trim()}';
+}
+
+String variantImageUrlForOption({
+  required String optionType,
+  required String optionValue,
+  required Map<String, String> images,
+}) {
+  final option = optionValue.trim();
+  if (option.isEmpty) return '';
+  return images[variantImageKey(optionType, option)] ?? images[option] ?? '';
+}
+
+String productVariantImageUrl(Product product, String color, String size) {
+  final hasVariantChoice = color.isNotEmpty || size.isNotEmpty;
+  final colorImage = variantImageUrlForOption(
+    optionType: 'color',
+    optionValue: color,
+    images: product.variantImageUrls,
+  );
+  final sizeImage = variantImageUrlForOption(
+    optionType: 'size',
+    optionValue: size,
+    images: product.variantImageUrls,
+  );
+  final explicitImage = colorImage.isNotEmpty ? colorImage : sizeImage;
+  if (explicitImage.isNotEmpty) return explicitImage;
+  return hasVariantChoice ? '' : product.imageUrl;
+}
+
+List<ProductMediaItem> productDisplayMediaItems(Product product) {
+  final recommendationMedia = product.mediaItems.isNotEmpty
+      ? product.mediaItems
+      : [
+          if (product.videoUrl.trim().isNotEmpty)
+            ProductMediaItem(type: 'video', url: product.videoUrl),
+          for (final url in product.galleryImageUrls.isNotEmpty
+              ? product.galleryImageUrls
+              : product.imageUrl.trim().isEmpty
+                  ? <String>[]
+                  : <String>[product.imageUrl])
+            ProductMediaItem(type: 'image', url: url),
+        ];
+  final usedUrls = recommendationMedia.map((item) => item.url).toSet();
+  final variantImageMedia = <ProductMediaItem>[];
+  for (final option in product.colorOptions) {
+    final imageUrl = variantImageUrlForOption(
+      optionType: 'color',
+      optionValue: option,
+      images: product.variantImageUrls,
+    ).trim();
+    if (imageUrl.isEmpty || usedUrls.contains(imageUrl)) continue;
+    usedUrls.add(imageUrl);
+    variantImageMedia.add(ProductMediaItem(type: 'image', url: imageUrl));
+  }
+  for (final option in product.sizeOptions) {
+    final imageUrl = variantImageUrlForOption(
+      optionType: 'size',
+      optionValue: option,
+      images: product.variantImageUrls,
+    ).trim();
+    if (imageUrl.isEmpty || usedUrls.contains(imageUrl)) continue;
+    usedUrls.add(imageUrl);
+    variantImageMedia.add(ProductMediaItem(type: 'image', url: imageUrl));
+  }
+  return [...recommendationMedia, ...variantImageMedia];
 }
 
 class OrderSuccessScreen extends StatelessWidget {
@@ -12172,31 +13732,31 @@ class _MeScreenState extends State<MeScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          const MeTwoColumnPanel(
+          MeTwoColumnPanel(
             title: 'กิจกรรมอื่น ๆ',
             action: 'ดูทั้งหมด',
             items: [
               MeMenuItem(
                   icon: Icons.storefront_outlined,
-                  label: 'เปิดร้านค้า',
+                  label: seller == null ? 'เปิดร้านค้า' : 'ร้านของฉัน',
                   route: '/seller'),
-              MeMenuItem(
+              const MeMenuItem(
                   icon: Icons.favorite_border,
                   label: 'สิ่งที่ฉันถูกใจ',
                   route: '/me/favorites'),
-              MeMenuItem(
+              const MeMenuItem(
                   icon: Icons.card_giftcard_outlined,
                   label: 'โปรแกรม Affiliate',
                   route: '/me/affiliate'),
-              MeMenuItem(
+              const MeMenuItem(
                   icon: Icons.phone_android_outlined,
                   label: 'E-Service',
                   route: '/me/e-service'),
-              MeMenuItem(
+              const MeMenuItem(
                   icon: Icons.history_outlined,
                   label: 'ดูล่าสุด',
                   route: '/me/recent'),
-              MeMenuItem(
+              const MeMenuItem(
                   icon: Icons.play_circle_outline,
                   label: 'Video',
                   route: '/me/campaigns'),
@@ -12522,8 +14082,8 @@ class MeSellerPanel extends StatelessWidget {
       child: Column(
         children: [
           MeSectionRow(
-            title: seller == null ? 'เริ่มขายบน NP Market' : 'ร้านค้าของฉัน',
-            action: seller == null ? 'เปิดร้าน' : 'เข้าศูนย์ผู้ขาย',
+            title: seller == null ? 'เปิดร้านค้า' : 'ร้านของฉัน',
+            action: seller == null ? 'เปิดร้านค้า' : 'ร้านของฉัน',
             onTap: () => _openSellerTarget(context),
           ),
           const Divider(height: 1),
@@ -12545,7 +14105,7 @@ class MeSellerPanel extends StatelessWidget {
                             children: [
                               Text(
                                 seller?.shopName ??
-                                    'เปิดร้าน ลงสินค้า และรับออเดอร์ได้ที่นี่',
+                                    'เปิดร้านค้า ลงสินค้า และรับออเดอร์ได้ที่นี่',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -12557,7 +14117,7 @@ class MeSellerPanel extends StatelessWidget {
                               const SizedBox(height: 2),
                               Text(
                                 seller == null
-                                    ? 'เมนูร้านค้าอยู่ในหน้า ฉัน ตามโครง Shopee'
+                                    ? 'เมนูเปิดร้านค้าอยู่ในหน้า ฉัน ตามโครง Shopee'
                                     : 'สินค้าเปิดขาย $productCount รายการ · รองรับขนส่ง 5 บริษัท',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,

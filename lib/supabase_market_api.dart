@@ -224,7 +224,7 @@ class SupabaseMarketApi {
 
     final uri = Uri.parse(
       '$supabaseUrl/rest/v1/products'
-      '?select=id,shop_id,category_id,name,price,original_price,stock,rating,sold_count,badge,status,shops!inner(name,pickup_province,category,status),categories(name),product_media(type,url,sort_order),product_variants(color,size,is_active,stock)'
+      '?select=id,shop_id,category_id,name,description,sku,price,original_price,stock,weight_kg,parcel_size,ship_from_province,rating,sold_count,badge,status,shops!inner(name,pickup_province,category,status),categories(name),product_media(type,url,sort_order),product_variants(color,size,sku,image_url,price,is_active,stock),product_variant_images(option_type,option_value,image_url,sort_order),product_size_charts(image_url),product_attributes(name,value,sort_order),product_detail_images(image_url,sort_order)'
       '&status=eq.active'
       '&shops.status=eq.active'
       '&order=created_at.desc',
@@ -384,7 +384,7 @@ class SupabaseMarketApi {
     if (shop == null || shop.id.isEmpty) return const [];
     final uri = Uri.parse(
       '$supabaseUrl/rest/v1/products'
-      '?select=id,shop_id,category_id,name,price,original_price,stock,rating,sold_count,badge,status,shops(name,pickup_province,category),categories(name),product_media(type,url,sort_order),product_variants(color,size,is_active,stock)'
+      '?select=id,shop_id,category_id,name,description,sku,price,original_price,stock,weight_kg,parcel_size,ship_from_province,rating,sold_count,badge,status,shops(name,pickup_province,category),categories(name),product_media(type,url,sort_order),product_variants(color,size,sku,image_url,price,is_active,stock),product_variant_images(option_type,option_value,image_url,sort_order),product_size_charts(image_url),product_attributes(name,value,sort_order),product_detail_images(image_url,sort_order)'
       '&shop_id=eq.${Uri.encodeComponent(shop.id)}'
       '&order=created_at.desc',
     );
@@ -417,6 +417,12 @@ class SupabaseMarketApi {
     }
 
     final categoryId = await _categoryIdByName(session, product.category);
+    final effectiveDescription =
+        description.trim().isEmpty ? product.description : description.trim();
+    final effectiveSku = sku.trim().isEmpty ? product.sku : sku.trim();
+    final effectiveWeightKg = weightKg <= 0 ? product.weightKg : weightKg;
+    final effectiveParcelSize =
+        parcelSize.trim().isEmpty ? product.parcelSize : parcelSize.trim();
     final productRow = await _insertReturningSingle(
       session,
       'products',
@@ -424,62 +430,136 @@ class SupabaseMarketApi {
         'shop_id': shop.id,
         if (categoryId.isNotEmpty) 'category_id': categoryId,
         'name': product.name,
-        'description': description,
-        'sku': sku,
+        'description': effectiveDescription,
+        'sku': effectiveSku,
         'price': product.price,
         'original_price': product.originalPrice,
         'stock': product.stock,
-        'weight_kg': weightKg,
-        'parcel_size': parcelSize,
+        'weight_kg': effectiveWeightKg,
+        'parcel_size': effectiveParcelSize,
         'ship_from_province': product.location,
         'badge': product.badge,
-        'status': product.stock <= 0 ? 'sold_out' : 'active',
+        'status': _productStatusCode(product.status, stock: product.stock),
       },
     );
     final productId = productRow['id']?.toString() ?? '';
 
     final mediaRows = <Map<String, dynamic>>[];
-    if (product.imageUrl.trim().isNotEmpty) {
+    final orderedMedia = _productMediaItems(product);
+    for (var i = 0; i < orderedMedia.length; i++) {
       mediaRows.add(
         {
           'product_id': productId,
-          'type': 'image',
-          'url': product.imageUrl.trim(),
-          'sort_order': 0,
-        },
-      );
-    }
-    if (product.videoUrl.trim().isNotEmpty) {
-      mediaRows.add(
-        {
-          'product_id': productId,
-          'type': 'video',
-          'url': product.videoUrl.trim(),
-          'sort_order': 1,
+          'type': orderedMedia[i].type,
+          'url': orderedMedia[i].url,
+          'sort_order': i,
         },
       );
     }
     await _insertRows(session, 'product_media', mediaRows);
+    await _upsertSizeChart(
+      session: session,
+      productId: productId,
+      imageUrl: product.sizeChartImageUrl ?? '',
+    );
+    await _upsertProductAttributes(
+      session: session,
+      productId: productId,
+      attributes: product.attributes,
+    );
+    await _upsertProductDetailImages(
+      session: session,
+      productId: productId,
+      imageUrls: product.detailImageUrls,
+    );
 
-    final variants = <Map<String, dynamic>>[];
-    final colors = product.colorOptions.isEmpty ? [''] : product.colorOptions;
-    final sizes = product.sizeOptions.isEmpty ? [''] : product.sizeOptions;
-    for (final color in colors) {
-      for (final size in sizes) {
-        variants.add({
-          'product_id': productId,
-          'color': color,
-          'size': size,
-          'sku': [sku, color, size].where((part) => part.isNotEmpty).join('-'),
-          'price': product.price,
-          'stock': product.stock,
-          'is_active': true,
-        });
-      }
-    }
-    await _insertRows(session, 'product_variants', variants);
+    await _insertRows(
+      session,
+      'product_variants',
+      _productVariantRows(
+        productId: productId,
+        product: product,
+        sku: effectiveSku,
+      ),
+    );
+    await _insertRows(
+      session,
+      'product_variant_images',
+      _productVariantImageRows(productId: productId, product: product),
+    );
 
     return product.copyWithId(productId, shop.id);
+  }
+
+  Future<void> _upsertSizeChart({
+    required CustomerSession session,
+    required String productId,
+    required String imageUrl,
+  }) async {
+    await http.delete(
+      Uri.parse(
+        '$supabaseUrl/rest/v1/product_size_charts?product_id=eq.${Uri.encodeComponent(productId)}',
+      ),
+      headers: _authHeaders(session),
+    );
+    if (imageUrl.trim().isEmpty) return;
+    await _insertRows(session, 'product_size_charts', [
+      {
+        'product_id': productId,
+        'image_url': imageUrl.trim(),
+      },
+    ]);
+  }
+
+  Future<void> _upsertProductAttributes({
+    required CustomerSession session,
+    required String productId,
+    required Map<String, String> attributes,
+  }) async {
+    await http.delete(
+      Uri.parse(
+        '$supabaseUrl/rest/v1/product_attributes?product_id=eq.${Uri.encodeComponent(productId)}',
+      ),
+      headers: _authHeaders(session),
+    );
+    final rows = <Map<String, dynamic>>[];
+    var sortOrder = 0;
+    for (final entry in attributes.entries) {
+      final name = entry.key.trim();
+      final value = entry.value.trim();
+      if (name.isEmpty || value.isEmpty) continue;
+      rows.add({
+        'product_id': productId,
+        'name': name,
+        'value': value,
+        'sort_order': sortOrder++,
+      });
+    }
+    await _insertRows(session, 'product_attributes', rows);
+  }
+
+  Future<void> _upsertProductDetailImages({
+    required CustomerSession session,
+    required String productId,
+    required List<String> imageUrls,
+  }) async {
+    await http.delete(
+      Uri.parse(
+        '$supabaseUrl/rest/v1/product_detail_images?product_id=eq.${Uri.encodeComponent(productId)}',
+      ),
+      headers: _authHeaders(session),
+    );
+    final rows = <Map<String, dynamic>>[];
+    for (var i = 0; i < imageUrls.length; i++) {
+      final imageUrl = imageUrls[i].trim();
+      if (imageUrl.isEmpty) continue;
+      rows.add({
+        'product_id': productId,
+        'image_url': imageUrl,
+        'sort_order': i,
+      });
+    }
+    await _insertRows(session, 'product_detail_images', rows);
   }
 
   Future<void> deleteSellerProduct({
@@ -515,6 +595,12 @@ class SupabaseMarketApi {
       throw StateError('Your shop must be approved before updating products.');
     }
     final categoryId = await _categoryIdByName(session, product.category);
+    final effectiveDescription =
+        description.trim().isEmpty ? product.description : description.trim();
+    final effectiveSku = sku.trim().isEmpty ? product.sku : sku.trim();
+    final effectiveWeightKg = weightKg <= 0 ? product.weightKg : weightKg;
+    final effectiveParcelSize =
+        parcelSize.trim().isEmpty ? product.parcelSize : parcelSize.trim();
     final response = await http.patch(
       Uri.parse(
         '$supabaseUrl/rest/v1/products?id=eq.${Uri.encodeComponent(product.id)}&shop_id=eq.${Uri.encodeComponent(shop.id)}&select=*',
@@ -523,16 +609,16 @@ class SupabaseMarketApi {
       body: jsonEncode({
         if (categoryId.isNotEmpty) 'category_id': categoryId,
         'name': product.name,
-        'description': description,
-        'sku': sku,
+        'description': effectiveDescription,
+        'sku': effectiveSku,
         'price': product.price,
         'original_price': product.originalPrice,
         'stock': product.stock,
-        'weight_kg': weightKg,
-        'parcel_size': parcelSize,
+        'weight_kg': effectiveWeightKg,
+        'parcel_size': effectiveParcelSize,
         'ship_from_province': product.location,
         'badge': product.badge,
-        'status': product.stock <= 0 ? 'sold_out' : 'active',
+        'status': _productStatusCode(product.status, stock: product.stock),
         'updated_at': DateTime.now().toUtc().toIso8601String(),
       }),
     );
@@ -549,23 +635,57 @@ class SupabaseMarketApi {
       headers: _authHeaders(session),
     );
     final mediaRows = <Map<String, dynamic>>[];
-    if (product.imageUrl.trim().isNotEmpty) {
+    final orderedMedia = _productMediaItems(product);
+    for (var i = 0; i < orderedMedia.length; i++) {
       mediaRows.add({
         'product_id': product.id,
-        'type': 'image',
-        'url': product.imageUrl.trim(),
-        'sort_order': 0,
-      });
-    }
-    if (product.videoUrl.trim().isNotEmpty) {
-      mediaRows.add({
-        'product_id': product.id,
-        'type': 'video',
-        'url': product.videoUrl.trim(),
-        'sort_order': 1,
+        'type': orderedMedia[i].type,
+        'url': orderedMedia[i].url,
+        'sort_order': i,
       });
     }
     await _insertRows(session, 'product_media', mediaRows);
+    await _upsertSizeChart(
+      session: session,
+      productId: product.id,
+      imageUrl: product.sizeChartImageUrl ?? '',
+    );
+    await _upsertProductAttributes(
+      session: session,
+      productId: product.id,
+      attributes: product.attributes,
+    );
+    await _upsertProductDetailImages(
+      session: session,
+      productId: product.id,
+      imageUrls: product.detailImageUrls,
+    );
+    await http.delete(
+      Uri.parse(
+        '$supabaseUrl/rest/v1/product_variants?product_id=eq.${Uri.encodeComponent(product.id)}',
+      ),
+      headers: _authHeaders(session),
+    );
+    await _insertRows(
+      session,
+      'product_variants',
+      _productVariantRows(
+        productId: product.id,
+        product: product,
+        sku: effectiveSku,
+      ),
+    );
+    await http.delete(
+      Uri.parse(
+        '$supabaseUrl/rest/v1/product_variant_images?product_id=eq.${Uri.encodeComponent(product.id)}',
+      ),
+      headers: _authHeaders(session),
+    );
+    await _insertRows(
+      session,
+      'product_variant_images',
+      _productVariantImageRows(productId: product.id, product: product),
+    );
     return product.copyWithId(product.id, shop.id);
   }
 
@@ -718,6 +838,15 @@ class SupabaseMarketApi {
                   'shopName': item.product.shopName,
                   'category': item.product.category,
                   'imageUrl': item.product.imageUrl,
+                  'description': item.product.description,
+                  'sku': item.product.sku,
+                  'weightKg': item.product.weightKg,
+                  'parcelSize': item.product.parcelSize,
+                  'status': item.product.status,
+                  'galleryImageUrls': item.product.galleryImageUrls,
+                  'variantImageUrls': item.product.variantImageUrls,
+                  'attributes': item.product.attributes,
+                  'detailImageUrls': item.product.detailImageUrls,
                 },
                 'quantity': item.quantity,
                 'unit_price': item.product.price,
@@ -779,6 +908,7 @@ class SupabaseMarketApi {
   Product _productFromJson(Map<String, dynamic> row) {
     final shop = _firstRelation(row['shops']);
     final category = _firstRelation(row['categories']);
+    final sizeChart = _firstRelation(row['product_size_charts']);
     final media = (row['product_media'] as List<dynamic>? ?? const [])
         .cast<Map<String, dynamic>>()
       ..sort((a, b) => (a['sort_order'] ?? 0).compareTo(b['sort_order'] ?? 0));
@@ -786,12 +916,57 @@ class SupabaseMarketApi {
         .cast<Map<String, dynamic>>()
         .where((variant) => variant['is_active'] == true)
         .toList();
+    final optionImages = (row['product_variant_images'] as List<dynamic>? ??
+            const [])
+        .cast<Map<String, dynamic>>()
+      ..sort((a, b) => (a['sort_order'] ?? 0).compareTo(b['sort_order'] ?? 0));
+    final attributeRows = (row['product_attributes'] as List<dynamic>? ??
+            const [])
+        .cast<Map<String, dynamic>>()
+      ..sort((a, b) => (a['sort_order'] ?? 0).compareTo(b['sort_order'] ?? 0));
+    final detailImageRows = (row['product_detail_images'] as List<dynamic>? ??
+            const [])
+        .cast<Map<String, dynamic>>()
+      ..sort((a, b) => (a['sort_order'] ?? 0).compareTo(b['sort_order'] ?? 0));
 
     final price = _num(row['price']);
     final originalPrice = _num(row['original_price']);
     final stock = (row['stock'] as num?)?.toInt() ?? 0;
     final colors = _uniqueStrings(variants.map((variant) => variant['color']));
     final sizes = _uniqueStrings(variants.map((variant) => variant['size']));
+    final galleryImageUrls = _uniqueStrings(
+      media
+          .where((item) => item['type']?.toString() == 'image')
+          .map((item) => item['url']),
+    );
+    final mediaItems = media
+        .map(
+          (item) => ProductMediaItem(
+            type: item['type']?.toString() == 'video' ? 'video' : 'image',
+            url: item['url']?.toString() ?? '',
+          ),
+        )
+        .where((item) => item.url.trim().isNotEmpty)
+        .toList(growable: false);
+    final variantImageUrls = <String, String>{};
+    for (final variant in variants) {
+      final imageUrl = variant['image_url']?.toString().trim() ?? '';
+      if (imageUrl.isEmpty) continue;
+      final color = variant['color']?.toString().trim() ?? '';
+      final size = variant['size']?.toString().trim() ?? '';
+      if (color.isNotEmpty) {
+        variantImageUrls[color] ??= imageUrl;
+      } else if (size.isNotEmpty) {
+        variantImageUrls[size] ??= imageUrl;
+      }
+    }
+    for (final optionImage in optionImages) {
+      final optionType = optionImage['option_type']?.toString().trim() ?? '';
+      final option = optionImage['option_value']?.toString().trim() ?? '';
+      final imageUrl = optionImage['image_url']?.toString().trim() ?? '';
+      if (option.isEmpty || imageUrl.isEmpty) continue;
+      variantImageUrls[_variantImageKey(optionType, option)] = imageUrl;
+    }
     final imageMedia = media.cast<Map<String, dynamic>?>().firstWhere(
           (item) => item?['type']?.toString() == 'image',
           orElse: () => media.isEmpty ? null : media.first,
@@ -801,6 +976,15 @@ class SupabaseMarketApi {
           orElse: () => null,
         );
     final videoUrl = videoMedia?['url']?.toString() ?? '';
+    final attributes = <String, String>{};
+    for (final attribute in attributeRows) {
+      final name = attribute['name']?.toString().trim() ?? '';
+      final value = attribute['value']?.toString().trim() ?? '';
+      if (name.isNotEmpty && value.isNotEmpty) attributes[name] = value;
+    }
+    final detailImageUrls = _uniqueStrings(
+      detailImageRows.map((item) => item['image_url']),
+    );
 
     return Product(
       id: row['id']?.toString() ?? '',
@@ -815,7 +999,9 @@ class SupabaseMarketApi {
       soldCount: (row['sold_count'] as num?)?.toInt() ?? 0,
       imageUrl: imageMedia?['url']?.toString() ?? '',
       badge: row['badge']?.toString() ?? '',
-      location: shop?['pickup_province']?.toString() ?? '',
+      location: row['ship_from_province']?.toString() ??
+          shop?['pickup_province']?.toString() ??
+          '',
       shippingLabel: 'จัดส่งโดยร้านค้า',
       serviceLabel: 'NP Market',
       promoLabel: '',
@@ -824,8 +1010,19 @@ class SupabaseMarketApi {
       videoViews: videoUrl.isEmpty ? '' : 'วิดีโอ',
       videoUrl: videoUrl,
       stock: stock,
+      description: row['description']?.toString() ?? '',
+      sku: row['sku']?.toString() ?? '',
+      weightKg: _num(row['weight_kg']),
+      parcelSize: row['parcel_size']?.toString() ?? '',
+      status: row['status']?.toString() ?? 'active',
+      mediaItems: mediaItems,
+      galleryImageUrls: galleryImageUrls,
+      variantImageUrls: variantImageUrls,
       colorOptions: colors,
       sizeOptions: sizes,
+      sizeChartImageUrl: sizeChart?['image_url']?.toString(),
+      attributes: attributes,
+      detailImageUrls: detailImageUrls,
     );
   }
 
@@ -876,6 +1073,15 @@ class SupabaseMarketApi {
       isVideo: false,
       videoViews: '',
       stock: 1,
+      description: snapshot['description']?.toString() ?? '',
+      sku: snapshot['sku']?.toString() ?? '',
+      weightKg: _num(snapshot['weightKg']),
+      parcelSize: snapshot['parcelSize']?.toString() ?? '',
+      status: snapshot['status']?.toString() ?? 'active',
+      galleryImageUrls: _snapshotStringList(snapshot['galleryImageUrls']),
+      variantImageUrls: _snapshotStringMap(snapshot['variantImageUrls']),
+      attributes: _snapshotStringMap(snapshot['attributes']),
+      detailImageUrls: _snapshotStringList(snapshot['detailImageUrls']),
     );
     return CartItem(
       product: product,
@@ -1253,9 +1459,146 @@ List<String> _uniqueStrings(Iterable<dynamic> values) {
   return result;
 }
 
+List<String> _productGalleryImages(Product product) {
+  return _uniqueStrings([
+    product.imageUrl,
+    ...product.galleryImageUrls,
+  ]);
+}
+
+List<ProductMediaItem> _productMediaItems(Product product) {
+  if (product.mediaItems.isNotEmpty) {
+    return product.mediaItems
+        .where((item) => item.url.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+  return [
+    for (final url in _productGalleryImages(product))
+      ProductMediaItem(type: 'image', url: url),
+    if (product.videoUrl.trim().isNotEmpty)
+      ProductMediaItem(type: 'video', url: product.videoUrl.trim()),
+  ];
+}
+
+List<Map<String, dynamic>> _productVariantRows({
+  required String productId,
+  required Product product,
+  required String sku,
+}) {
+  final variants = <Map<String, dynamic>>[];
+  final colors = product.colorOptions.isEmpty ? [''] : product.colorOptions;
+  final sizes = product.sizeOptions.isEmpty ? [''] : product.sizeOptions;
+  for (final color in colors) {
+    for (final size in sizes) {
+      final colorImage = _variantImageUrlForOption(
+        product: product,
+        optionType: 'color',
+        optionValue: color,
+      );
+      final sizeImage = _variantImageUrlForOption(
+        product: product,
+        optionType: 'size',
+        optionValue: size,
+      );
+      final imageUrl = colorImage.isNotEmpty ? colorImage : sizeImage;
+      variants.add({
+        'product_id': productId,
+        'color': color,
+        'size': size,
+        'sku': [sku, color, size].where((part) => part.isNotEmpty).join('-'),
+        'image_url': imageUrl.isEmpty ? null : imageUrl,
+        'price': product.price,
+        'stock': product.stock,
+        'is_active': true,
+      });
+    }
+  }
+  return variants;
+}
+
+String _variantImageKey(String optionType, String optionValue) {
+  return '$optionType::${optionValue.trim()}';
+}
+
+String _variantImageUrlForOption({
+  required Product product,
+  required String optionType,
+  required String optionValue,
+}) {
+  final option = optionValue.trim();
+  if (option.isEmpty) return '';
+  return product.variantImageUrls[_variantImageKey(optionType, option)] ??
+      product.variantImageUrls[option] ??
+      '';
+}
+
+List<Map<String, dynamic>> _productVariantImageRows({
+  required String productId,
+  required Product product,
+}) {
+  final rows = <Map<String, dynamic>>[];
+  final seen = <String>{};
+  void addOption(String optionType, String optionValue) {
+    final option = optionValue.trim();
+    final imageUrl = _variantImageUrlForOption(
+      product: product,
+      optionType: optionType,
+      optionValue: option,
+    ).trim();
+    final key = '$optionType::$option';
+    if (option.isEmpty || imageUrl.isEmpty || seen.contains(key)) return;
+    seen.add(key);
+    rows.add({
+      'product_id': productId,
+      'option_type': optionType,
+      'option_value': option,
+      'image_url': imageUrl,
+      'sort_order': rows.length,
+    });
+  }
+
+  for (final color in product.colorOptions) {
+    addOption('color', color);
+  }
+  for (final size in product.sizeOptions) {
+    addOption('size', size);
+  }
+  return rows;
+}
+
+List<String> _snapshotStringList(dynamic value) {
+  if (value is List) return _uniqueStrings(value);
+  return const [];
+}
+
+Map<String, String> _snapshotStringMap(dynamic value) {
+  if (value is! Map) return const {};
+  final result = <String, String>{};
+  value.forEach((key, mapValue) {
+    final option = key?.toString().trim() ?? '';
+    final imageUrl = mapValue?.toString().trim() ?? '';
+    if (option.isNotEmpty && imageUrl.isNotEmpty) result[option] = imageUrl;
+  });
+  return result;
+}
+
 int _discountPercent(double price, double originalPrice) {
   if (originalPrice <= 0 || price <= 0 || price >= originalPrice) return 0;
   return (((originalPrice - price) / originalPrice) * 100).round();
+}
+
+String _productStatusCode(String status, {required int stock}) {
+  final normalized = status.trim();
+  if (normalized == 'active' && stock <= 0) return 'sold_out';
+  if (normalized == 'active' ||
+      normalized == 'draft' ||
+      normalized == 'hidden' ||
+      normalized == 'sold_out' ||
+      normalized == 'suspended') {
+    return normalized;
+  }
+  if (stock <= 0) return 'sold_out';
+  return 'active';
 }
 
 String _orderStatusLabel(String status) {
@@ -1347,9 +1690,19 @@ extension _ProductCopy on Product {
       videoViews: videoViews,
       videoUrl: videoUrl,
       stock: stock,
+      description: description,
+      sku: sku,
+      weightKg: weightKg,
+      parcelSize: parcelSize,
+      status: status,
+      mediaItems: mediaItems,
+      galleryImageUrls: galleryImageUrls,
+      variantImageUrls: variantImageUrls,
       colorOptions: colorOptions,
       sizeOptions: sizeOptions,
       sizeChartImageUrl: sizeChartImageUrl,
+      attributes: attributes,
+      detailImageUrls: detailImageUrls,
     );
   }
 }

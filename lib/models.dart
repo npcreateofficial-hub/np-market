@@ -1,3 +1,16 @@
+class ProductMediaItem {
+  const ProductMediaItem({
+    required this.type,
+    required this.url,
+  });
+
+  final String type;
+  final String url;
+
+  bool get isVideo => type == 'video';
+  bool get isImage => type == 'image';
+}
+
 class Product {
   const Product({
     required this.id,
@@ -20,9 +33,19 @@ class Product {
     required this.videoViews,
     this.videoUrl = '',
     this.stock = 268,
+    this.description = '',
+    this.sku = '',
+    this.weightKg = 0,
+    this.parcelSize = '',
+    this.status = 'active',
+    this.mediaItems = const [],
+    this.galleryImageUrls = const [],
+    this.variantImageUrls = const {},
     this.colorOptions = const [],
     this.sizeOptions = const [],
     this.sizeChartImageUrl,
+    this.attributes = const {},
+    this.detailImageUrls = const [],
   });
 
   final String id;
@@ -45,9 +68,91 @@ class Product {
   final String videoViews;
   final String videoUrl;
   final int stock;
+  final String description;
+  final String sku;
+  final double weightKg;
+  final String parcelSize;
+  final String status;
+  final List<ProductMediaItem> mediaItems;
+  final List<String> galleryImageUrls;
+  final Map<String, String> variantImageUrls;
   final List<String> colorOptions;
   final List<String> sizeOptions;
   final String? sizeChartImageUrl;
+  final Map<String, String> attributes;
+  final List<String> detailImageUrls;
+
+  Product copyWith({
+    String? id,
+    String? name,
+    String? shopId,
+    String? shopName,
+    String? category,
+    double? price,
+    double? originalPrice,
+    double? rating,
+    int? soldCount,
+    String? imageUrl,
+    String? badge,
+    String? location,
+    String? shippingLabel,
+    String? serviceLabel,
+    String? promoLabel,
+    int? discountPercent,
+    bool? isVideo,
+    String? videoViews,
+    String? videoUrl,
+    int? stock,
+    String? description,
+    String? sku,
+    double? weightKg,
+    String? parcelSize,
+    String? status,
+    List<ProductMediaItem>? mediaItems,
+    List<String>? galleryImageUrls,
+    Map<String, String>? variantImageUrls,
+    List<String>? colorOptions,
+    List<String>? sizeOptions,
+    String? sizeChartImageUrl,
+    Map<String, String>? attributes,
+    List<String>? detailImageUrls,
+  }) {
+    return Product(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      shopId: shopId ?? this.shopId,
+      shopName: shopName ?? this.shopName,
+      category: category ?? this.category,
+      price: price ?? this.price,
+      originalPrice: originalPrice ?? this.originalPrice,
+      rating: rating ?? this.rating,
+      soldCount: soldCount ?? this.soldCount,
+      imageUrl: imageUrl ?? this.imageUrl,
+      badge: badge ?? this.badge,
+      location: location ?? this.location,
+      shippingLabel: shippingLabel ?? this.shippingLabel,
+      serviceLabel: serviceLabel ?? this.serviceLabel,
+      promoLabel: promoLabel ?? this.promoLabel,
+      discountPercent: discountPercent ?? this.discountPercent,
+      isVideo: isVideo ?? this.isVideo,
+      videoViews: videoViews ?? this.videoViews,
+      videoUrl: videoUrl ?? this.videoUrl,
+      stock: stock ?? this.stock,
+      description: description ?? this.description,
+      sku: sku ?? this.sku,
+      weightKg: weightKg ?? this.weightKg,
+      parcelSize: parcelSize ?? this.parcelSize,
+      status: status ?? this.status,
+      mediaItems: mediaItems ?? this.mediaItems,
+      galleryImageUrls: galleryImageUrls ?? this.galleryImageUrls,
+      variantImageUrls: variantImageUrls ?? this.variantImageUrls,
+      colorOptions: colorOptions ?? this.colorOptions,
+      sizeOptions: sizeOptions ?? this.sizeOptions,
+      sizeChartImageUrl: sizeChartImageUrl ?? this.sizeChartImageUrl,
+      attributes: attributes ?? this.attributes,
+      detailImageUrls: detailImageUrls ?? this.detailImageUrls,
+    );
+  }
 }
 
 class MarketCategory {
