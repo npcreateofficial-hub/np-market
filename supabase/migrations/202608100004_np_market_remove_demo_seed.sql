@@ -1,0 +1,31 @@
+delete from public.reports
+where target_id in (
+  '00000000-0000-0000-0000-000000000101',
+  '00000000-0000-0000-0000-000000000102',
+  '00000000-0000-0000-0000-000000000103'
+);
+
+delete from public.payouts
+where shop_id in (
+  '00000000-0000-0000-0000-000000000101',
+  '00000000-0000-0000-0000-000000000102',
+  '00000000-0000-0000-0000-000000000103'
+);
+
+delete from public.products
+where shop_id in (
+  '00000000-0000-0000-0000-000000000101',
+  '00000000-0000-0000-0000-000000000102',
+  '00000000-0000-0000-0000-000000000103'
+);
+
+delete from public.shops
+where id in (
+  '00000000-0000-0000-0000-000000000101',
+  '00000000-0000-0000-0000-000000000102',
+  '00000000-0000-0000-0000-000000000103'
+)
+or name in ('NP Basics Store', 'Daily Bag Studio', 'Home Everyday');
+
+delete from public.banners
+where title = 'NP Market Demo Sale';

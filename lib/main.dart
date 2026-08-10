@@ -2,6 +2,7 @@
 
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -23,11 +24,36 @@ void main() {
 
 final appStore = AppStore();
 
+const shopeeProductCategories = [
+  'ความงามและของใช้ส่วนตัว',
+  'กลุ่มผลิตภัณฑ์เพื่อสุขภาพ',
+  'เสื้อผ้าแฟชั่นผู้ชาย',
+  'เสื้อผ้าแฟชั่นผู้หญิง',
+  'กระเป๋า',
+  'รองเท้าผู้ชาย',
+  'รองเท้าผู้หญิง',
+  'เครื่องประดับ',
+  'นาฬิกาและแว่นตา',
+  'เครื่องใช้ในบ้าน',
+  'อุปกรณ์อิเล็กทรอนิกส์',
+  'มือถือ และ แท็บเล็ต',
+  'เครื่องใช้ไฟฟ้าภายในบ้าน',
+  'คอมพิวเตอร์และแล็ปท็อป',
+  'กล้องและอุปกรณ์ถ่ายภาพ',
+  'อาหารและเครื่องดื่ม',
+  'ของเล่น สินค้าแม่และเด็ก',
+  'กีฬาและกิจกรรมกลางแจ้ง',
+  'สัตว์เลี้ยง',
+  'เกมและอุปกรณ์เสริม',
+  'ยานยนต์',
+  'เครื่องเขียน หนังสือ และงานอดิเรก',
+  'ตั๋วและบัตรกำนัล',
+  'ช้อปปี้เพย์ใกล้ตัว',
+];
+
 List<Product> get marketplaceProducts => [
       ...appStore.sellerProducts,
-      ...(appStore.remoteProducts.isNotEmpty
-          ? appStore.remoteProducts
-          : featuredProducts),
+      ...appStore.remoteProducts,
     ];
 
 class AppStore extends ChangeNotifier {
@@ -40,39 +66,17 @@ class AppStore extends ChangeNotifier {
   CustomerAccount? _customerAccount;
   CustomerSession? _customerSession;
   bool _isAuthBusy = false;
+  bool _isSellerWorkspaceLoading = false;
   SellerProfile? _sellerProfile;
-  final List<Address> _addresses = [
-    const Address(
-      id: 'addr-001',
-      name: 'พงศธร ทวีคูล',
-      phone: '(+66) 88 576 9845',
-      detail: '789 หมู่ที่ 5',
-      province: 'จังหวัดขอนแก่น',
-      district: 'อำเภอเมืองขอนแก่น',
-      subDistrict: 'ตำบลพระลับ',
-      postcode: '40000',
-      isDefault: true,
-      label: 'บ้าน',
-    ),
-    const Address(
-      id: 'addr-002',
-      name: 'มุก',
-      phone: '(+66) 91 865 5919',
-      detail: 'บ้านพักพูลวิลล่า789 หมู่ที่ 5 ซอยประชาสโมสร 53',
-      province: 'จังหวัดขอนแก่น',
-      district: 'อำเภอเมืองขอนแก่น',
-      subDistrict: 'ตำบลพระลับ',
-      postcode: '40000',
-      label: 'ที่ทำงาน',
-    ),
-  ];
-  String _selectedAddressId = 'addr-001';
+  final List<Address> _addresses = [];
+  String _selectedAddressId = '';
 
   List<CartItem> get cartItems => List.unmodifiable(_cartItems);
   List<Order> get orders => List.unmodifiable(_orders);
   List<Product> get remoteProducts => List.unmodifiable(_remoteProducts);
   List<Product> get sellerProducts => List.unmodifiable(_sellerProducts);
   CustomerAccount? get customerAccount => _customerAccount;
+  CustomerSession? get customerSession => _customerSession;
   bool get isSignedIn => _customerSession != null;
   bool get isAuthenticated => _customerSession != null;
   bool get isAuthBusy => _isAuthBusy;
@@ -83,13 +87,23 @@ class AppStore extends ChangeNotifier {
   SellerProfile? get sellerProfile => _sellerProfile;
   bool get hasSellerShop => _sellerProfile != null;
   List<Address> get addresses => List.unmodifiable(_addresses);
-  Address get selectedAddress => _addresses.firstWhere(
-        (address) => address.id == _selectedAddressId,
-        orElse: () => _addresses.first,
-      );
+  Address? get selectedAddress {
+    if (_addresses.isEmpty) return null;
+    return _addresses.firstWhere(
+      (address) => address.id == _selectedAddressId,
+      orElse: () => _addresses.first,
+    );
+  }
 
   int get cartCount =>
       _cartItems.fold(0, (total, item) => total + item.quantity);
+
+  int get notificationCount {
+    var count = _orders.length;
+    final shop = _sellerProfile;
+    if (shop != null) count += 1;
+    return count;
+  }
 
   double get cartTotal =>
       _cartItems.fold(0, (total, item) => total + item.total);
@@ -135,6 +149,7 @@ class AppStore extends ChangeNotifier {
       _orders
         ..clear()
         ..addAll(orders);
+      await loadSellerWorkspace();
       notifyListeners();
     } finally {
       _setAuthBusy(false);
@@ -165,6 +180,7 @@ class AppStore extends ChangeNotifier {
         phone: phone.trim(),
       );
       _orders.clear();
+      await loadSellerWorkspace();
       notifyListeners();
     } finally {
       _setAuthBusy(false);
@@ -176,6 +192,9 @@ class AppStore extends ChangeNotifier {
     _customerAccount = null;
     _cartItems.clear();
     _orders.clear();
+    _sellerProfile = null;
+    _sellerProducts.clear();
+    _sellerProductStatuses.clear();
     notifyListeners();
   }
 
@@ -194,7 +213,7 @@ class AppStore extends ChangeNotifier {
         ..addAll(products);
       notifyListeners();
     } catch (_) {
-      // Keep bundled demo data available when Supabase is not ready.
+      // Remote catalog stays empty when Supabase is unavailable.
     }
   }
 
@@ -263,15 +282,199 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void openSellerShop(SellerProfile profile) {
-    _sellerProfile = profile;
+  Future<void> loadSellerWorkspace() async {
+    if (!isSupabaseEnabled || _customerSession == null) return;
+    if (_isSellerWorkspaceLoading) return;
+    _isSellerWorkspaceLoading = true;
+    try {
+      final api = const SupabaseMarketApi();
+      final shop = await api.fetchMyShop(session: _customerSession!);
+      _sellerProfile = shop;
+      _sellerProducts.clear();
+      notifyListeners();
+      if (shop != null) {
+        try {
+          final products =
+              await api.fetchSellerProducts(session: _customerSession!);
+          _sellerProducts.addAll(products);
+        } catch (_) {
+          // Shop status is still the source of truth even if product loading fails.
+        }
+        try {
+          final sellerOrders =
+              await api.fetchSellerOrders(session: _customerSession!);
+          for (final sellerOrder in sellerOrders) {
+            final index =
+                _orders.indexWhere((order) => order.id == sellerOrder.id);
+            if (index >= 0) {
+              _orders[index] = sellerOrder;
+            } else {
+              _orders.add(sellerOrder);
+            }
+          }
+        } catch (_) {
+          // Seller center can open before order tables are ready.
+        }
+      }
+      notifyListeners();
+    } catch (_) {
+      // Keep local seller state usable when Supabase is not ready yet.
+    } finally {
+      _isSellerWorkspaceLoading = false;
+    }
+  }
+
+  Future<void> openSellerShop(
+    SellerProfile profile, {
+    String identityCardUrl = '',
+    String bankBookUrl = '',
+    String identityCardPath = '',
+    String bankBookPath = '',
+  }) async {
+    if (isSupabaseEnabled && _customerSession != null) {
+      _sellerProfile = await const SupabaseMarketApi().createOrUpdateShop(
+        session: _customerSession!,
+        profile: profile,
+        identityCardUrl: identityCardUrl,
+        bankBookUrl: bankBookUrl,
+        identityCardPath: identityCardPath,
+        bankBookPath: bankBookPath,
+      );
+    } else {
+      _sellerProfile = profile;
+    }
     notifyListeners();
   }
 
-  void addSellerProduct(Product product) {
-    _sellerProducts.insert(0, product);
-    _sellerProductStatuses[product.id] =
+  Future<UploadedShopFile> uploadSellerFile({
+    required String kind,
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    if (!isSupabaseEnabled || _customerSession == null) {
+      throw StateError('กรุณาเข้าสู่ระบบก่อนแนบไฟล์');
+    }
+    return const SupabaseMarketApi().uploadShopFile(
+      session: _customerSession!,
+      kind: kind,
+      fileName: fileName,
+      bytes: bytes,
+    );
+  }
+
+  Future<String> uploadProductMedia({
+    required String shopId,
+    required String kind,
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    if (!isSupabaseEnabled || _customerSession == null) {
+      throw StateError('กรุณาเข้าสู่ระบบก่อนแนบไฟล์สินค้า');
+    }
+    return const SupabaseMarketApi().uploadProductMedia(
+      session: _customerSession!,
+      shopId: shopId,
+      kind: kind,
+      fileName: fileName,
+      bytes: bytes,
+    );
+  }
+
+  Future<void> updateCustomerAvatar({
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    if (!isSupabaseEnabled || _customerSession == null) {
+      throw StateError('กรุณาเข้าสู่ระบบก่อนเพิ่มรูปโปรไฟล์');
+    }
+    final updated = await const SupabaseMarketApi().updateCustomerAvatar(
+      session: _customerSession!,
+      email: _customerAccount?.email ?? _customerSession!.email,
+      fileName: fileName,
+      bytes: bytes,
+    );
+    _customerAccount = updated;
+    notifyListeners();
+  }
+
+  Future<void> addSellerProduct(
+    Product product, {
+    String description = '',
+    String sku = '',
+    double weightKg = 0,
+    String parcelSize = '',
+  }) async {
+    var savedProduct = product;
+    if (isSupabaseEnabled &&
+        _customerSession != null &&
+        _sellerProfile != null &&
+        _sellerProfile!.id.isNotEmpty) {
+      savedProduct = await const SupabaseMarketApi().createSellerProduct(
+        session: _customerSession!,
+        shop: _sellerProfile!,
+        product: product,
+        description: description,
+        sku: sku,
+        weightKg: weightKg,
+        parcelSize: parcelSize,
+      );
+      _remoteProducts.clear();
+      await loadRemoteCatalog();
+    }
+    _sellerProducts.insert(0, savedProduct);
+    _sellerProductStatuses[savedProduct.id] =
         product.stock <= 0 ? 'หมดสต๊อก' : 'กำลังขาย';
+    notifyListeners();
+  }
+
+  Future<void> updateSellerProduct(
+    Product product, {
+    String description = '',
+    String sku = '',
+    double weightKg = 0,
+    String parcelSize = '',
+  }) async {
+    var savedProduct = product;
+    if (isSupabaseEnabled &&
+        _customerSession != null &&
+        _sellerProfile != null &&
+        _sellerProfile!.id.isNotEmpty) {
+      savedProduct = await const SupabaseMarketApi().updateSellerProduct(
+        session: _customerSession!,
+        shop: _sellerProfile!,
+        product: product,
+        description: description,
+        sku: sku,
+        weightKg: weightKg,
+        parcelSize: parcelSize,
+      );
+      _remoteProducts.clear();
+      await loadRemoteCatalog();
+    }
+    final index = _sellerProducts.indexWhere((item) => item.id == product.id);
+    if (index >= 0) {
+      _sellerProducts[index] = savedProduct;
+    } else {
+      _sellerProducts.insert(0, savedProduct);
+    }
+    _sellerProductStatuses[savedProduct.id] =
+        savedProduct.stock <= 0 ? 'หมดสต็อก' : 'กำลังขาย';
+    notifyListeners();
+  }
+
+  Future<void> deleteSellerProduct(Product product) async {
+    if (isSupabaseEnabled &&
+        _customerSession != null &&
+        product.id.isNotEmpty) {
+      await const SupabaseMarketApi().deleteSellerProduct(
+        session: _customerSession!,
+        productId: product.id,
+      );
+      _remoteProducts.clear();
+      await loadRemoteCatalog();
+    }
+    _sellerProducts.removeWhere((item) => item.id == product.id);
+    _sellerProductStatuses.remove(product.id);
     notifyListeners();
   }
 
@@ -280,12 +483,35 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void updateOrderShipping({
+  Future<void> updateOrderShipping({
     required String orderId,
     required String status,
     String? carrier,
     String? trackingNumber,
-  }) {
+  }) async {
+    if (isSupabaseEnabled && _customerSession != null) {
+      try {
+        final updated =
+            await const SupabaseMarketApi().updateSellerOrderShipment(
+          session: _customerSession!,
+          orderNo: orderId,
+          carrier: carrier ?? '',
+          trackingNumber: trackingNumber ?? '',
+          status: status,
+        );
+        if (updated != null) {
+          final updatedIndex =
+              _orders.indexWhere((order) => order.id == updated.id);
+          if (updatedIndex >= 0) {
+            _orders[updatedIndex] = updated;
+          }
+          notifyListeners();
+          return;
+        }
+      } catch (_) {
+        // Fall back to local update so the seller can keep moving in demo mode.
+      }
+    }
     final index = _orders.indexWhere((order) => order.id == orderId);
     if (index < 0) return;
     _orders[index] = _orders[index].copyWith(
@@ -303,6 +529,10 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<Order> createOrder(List<CartItem> items, String paymentMethod) async {
+    final checkoutAddress = selectedAddress;
+    if (checkoutAddress == null) {
+      throw StateError('กรุณาเพิ่มที่อยู่จัดส่งก่อนสั่งซื้อ');
+    }
     if (isSupabaseEnabled &&
         items.every((item) => item.product.shopId.isNotEmpty)) {
       final session = _customerSession;
@@ -311,7 +541,7 @@ class AppStore extends ChangeNotifier {
       }
       final orders = await const SupabaseMarketApi().createCheckoutOrders(
         items: items,
-        address: selectedAddress,
+        address: checkoutAddress,
         paymentMethod: paymentMethod,
         session: session,
       );
@@ -328,7 +558,7 @@ class AppStore extends ChangeNotifier {
     final order = Order(
       id: 'NP${DateTime.now().millisecondsSinceEpoch}',
       items: List.unmodifiable(items),
-      address: selectedAddress.fullAddress,
+      address: checkoutAddress.fullAddress,
       paymentMethod: paymentMethod,
       status: 'รอร้านยืนยัน',
       createdAt: DateTime.now(),
@@ -459,12 +689,10 @@ class NpMarketApp extends StatelessWidget {
               message:
                   'กล่องข้อความระหว่างผู้ซื้อกับร้านค้า สำหรับถามสินค้าและติดตามคำสั่งซื้อ',
             ),
-        '/me/notifications': (_) => const MeSubPage(
-              title: 'การแจ้งเตือน',
-              icon: Icons.notifications_none,
-              message:
-                  'แจ้งเตือนคำสั่งซื้อ โปรโมชัน แชท และข่าวสารจาก NP Market',
-            ),
+        '/me/notifications': (_) =>
+            const AuthRequiredScreen(child: NotificationsScreen()),
+        '/me/profile': (_) =>
+            const AuthRequiredScreen(child: AccountProfileScreen()),
         '/me/returns': (_) => const MeSubPage(
               title: 'คืนสินค้า/คืนเงิน',
               icon: Icons.assignment_return_outlined,
@@ -1007,18 +1235,22 @@ class MarketplaceShell extends StatefulWidget {
   State<MarketplaceShell> createState() => _MarketplaceShellState();
 }
 
-class _MarketplaceShellState extends State<MarketplaceShell> {
+class _MarketplaceShellState extends State<MarketplaceShell>
+    with WidgetsBindingObserver {
   int selectedIndex = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     appStore.addListener(_onStoreChanged);
     appStore.loadRemoteCatalog();
+    appStore.loadSellerWorkspace();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     appStore.removeListener(_onStoreChanged);
     super.dispose();
   }
@@ -1028,8 +1260,16 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && appStore.isSignedIn) {
+      appStore.loadSellerWorkspace();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    const pages = [
+    final notificationCount = appStore.notificationCount;
+    final pages = const [
       HomeScreen(),
       PlaceholderPage(
         title: 'ดีลพิเศษ',
@@ -1046,11 +1286,7 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
         message: 'วิดีโอสินค้า รีวิวสินค้า และฟีดสั้นจากร้านค้า',
         icon: Icons.play_circle_outline,
       ),
-      PlaceholderPage(
-        title: 'แจ้งเตือน',
-        message: 'ออเดอร์ แชท โปรโมชัน และสถานะจัดส่ง',
-        icon: Icons.notifications_none,
-      ),
+      NotificationsScreen(),
       MeScreen(),
     ];
     return Scaffold(
@@ -1060,41 +1296,66 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         onDestinationSelected: (index) async {
           if (index == 4 && !await requireCustomerLogin(context)) return;
+          if (index == 4 || index == 5) {
+            appStore.loadSellerWorkspace();
+          }
           setState(() => selectedIndex = index);
         },
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),
             label: 'หน้าแรก',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.local_offer_outlined),
             selectedIcon: Icon(Icons.local_offer),
             label: 'ดีลพิเศษ',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.store_mall_directory_outlined),
             selectedIcon: Icon(Icons.store_mall_directory),
             label: 'Mall',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.play_circle_outline),
             selectedIcon: Icon(Icons.play_circle),
             label: 'Video',
           ),
           NavigationDestination(
-            icon: Icon(Icons.notifications_none),
-            selectedIcon: Icon(Icons.notifications),
+            icon: NotificationNavIcon(count: notificationCount),
+            selectedIcon:
+                NotificationNavIcon(count: notificationCount, selected: true),
             label: 'แจ้งเตือน',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.person_outline),
             selectedIcon: Icon(Icons.person),
             label: 'ฉัน',
           ),
         ],
       ),
+    );
+  }
+}
+
+class NotificationNavIcon extends StatelessWidget {
+  const NotificationNavIcon({
+    super.key,
+    required this.count,
+    this.selected = false,
+  });
+
+  final int count;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Badge.count(
+      isLabelVisible: count > 0,
+      count: count > 99 ? 99 : count,
+      backgroundColor: accent,
+      child: Icon(selected ? Icons.notifications : Icons.notifications_none),
     );
   }
 }
@@ -3954,6 +4215,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         savings: platformDiscount,
         onPressed: () async {
           if (!await requireCustomerLogin(context)) return;
+          if (appStore.selectedAddress == null) {
+            await Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const AddressFormScreen()),
+            );
+            return;
+          }
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => PaymentMockScreen(items: widget.items),
@@ -4157,28 +4424,6 @@ class CheckoutPlatformVoucherCard extends StatelessWidget {
             icon: Icons.confirmation_number_outlined,
             title: 'โค้ดส่วนลด NP Market',
             value: '-${formatBaht(subtotal > 0 ? 48 : 0)}',
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 0, 14, 12),
-            child: ClipRRect(
-              borderRadius: BorderRadius.all(Radius.circular(8)),
-              child: ColoredBox(
-                color: Color(0xFFFFF1D8),
-                child: SizedBox(
-                  height: 42,
-                  width: double.infinity,
-                  child: Center(
-                    child: Text(
-                      'สมัคร VIP รับโค้ดส่งฟรีและส่วนลดเพิ่ม',
-                      style: TextStyle(
-                        color: accent,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
           ),
         ],
       ),
@@ -4860,13 +5105,18 @@ class PaymentDiscountTag extends StatelessWidget {
 class CheckoutAddressCard extends StatelessWidget {
   const CheckoutAddressCard({super.key, required this.address});
 
-  final Address address;
+  final Address? address;
 
   @override
   Widget build(BuildContext context) {
+    final currentAddress = address;
     return InkWell(
       onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const AddressSelectionScreen()),
+        MaterialPageRoute(
+          builder: (_) => currentAddress == null
+              ? const AddressFormScreen()
+              : const AddressSelectionScreen(),
+        ),
       ),
       child: CheckoutCard(
         child: Row(
@@ -4875,32 +5125,46 @@ class CheckoutAddressCard extends StatelessWidget {
             const Icon(Icons.location_on, color: accent, size: 22),
             const SizedBox(width: 8),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text('${address.name}  ${address.phone}',
-                            maxLines: 1,
+              child: currentAddress == null
+                  ? const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('เพิ่มที่อยู่จัดส่ง',
+                            style: TextStyle(
+                                color: ink, fontWeight: FontWeight.w900)),
+                        SizedBox(height: 4),
+                        Text('กรอกที่อยู่จริงก่อนทำรายการสั่งซื้อ',
+                            style: TextStyle(
+                                color: muted, fontSize: 12.5, height: 1.35)),
+                      ],
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                  '${currentAddress.name}  ${currentAddress.phone}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      color: ink, fontWeight: FontWeight.w900)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(currentAddress.fullAddress,
+                            maxLines: 3,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                color: ink, fontWeight: FontWeight.w900)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(address.fullAddress,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: muted, fontSize: 12.5, height: 1.35)),
-                  if (address.isDefault) ...[
-                    const SizedBox(height: 6),
-                    const ProductMiniTag(label: 'ค่าเริ่มต้น'),
-                  ],
-                ],
-              ),
+                                color: muted, fontSize: 12.5, height: 1.35)),
+                        if (currentAddress.isDefault) ...[
+                          const SizedBox(height: 6),
+                          const ProductMiniTag(label: 'ค่าเริ่มต้น'),
+                        ],
+                      ],
+                    ),
             ),
             const Icon(Icons.chevron_right, color: muted),
           ],
@@ -4952,7 +5216,7 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
           for (final address in appStore.addresses)
             AddressChoiceTile(
               address: address,
-              selected: address.id == selected.id,
+              selected: selected != null && address.id == selected.id,
               onTap: () {
                 appStore.selectAddress(address);
                 Navigator.of(context).pop();
@@ -5338,6 +5602,30 @@ class AddressArea {
   final String postcode;
 
   String get displayText => '$province, $district, $subDistrict, $postcode';
+}
+
+String cleanPickupDetail(String detail, AddressArea area) {
+  var cleaned = detail.trim();
+  final tokens = [
+    area.subDistrict,
+    area.district,
+    area.province,
+    area.postcode,
+    'ตำบล${area.subDistrict}',
+    'แขวง${area.subDistrict}',
+    'อำเภอ${area.district}',
+    'เขต${area.district}',
+    'จังหวัด${area.province}',
+  ].where((token) => token.trim().isNotEmpty);
+  for (final token in tokens) {
+    cleaned = cleaned.replaceAll(token, ' ');
+  }
+  cleaned = cleaned
+      .replaceAll(RegExp(r'(ตำบล|แขวง)\s*\S+'), ' ')
+      .replaceAll(RegExp(r'(อำเภอ|เขต)\s*\S+'), ' ')
+      .replaceAll(RegExp(r'จังหวัด\s*\S+'), ' ')
+      .replaceAll(RegExp(r'\s\d{5}(\s|$)'), ' ');
+  return cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
 }
 
 class AreaSelectionScreen extends StatefulWidget {
@@ -6313,6 +6601,9 @@ class _SellerCenterScreenState extends State<SellerCenterScreen> {
   void initState() {
     super.initState();
     appStore.addListener(_refresh);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appStore.loadSellerWorkspace();
+    });
   }
 
   @override
@@ -6353,11 +6644,14 @@ class _SellerCenterScreenState extends State<SellerCenterScreen> {
             SellerStartCard(
               onTap: () async {
                 if (!await requireCustomerLogin(context)) return;
+                if (!context.mounted) return;
                 Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const OpenShopScreen()),
                 );
               },
             )
+          else if (!seller.isVerified)
+            SellerApprovalPendingCard(seller: seller)
           else ...[
             SellerOrderStatusPanel(orders: orders),
             SellerToolGrid(
@@ -6388,15 +6682,23 @@ class _SellerCenterScreenState extends State<SellerCenterScreen> {
             border: Border(top: BorderSide(color: line)),
           ),
           child: FilledButton.icon(
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => hasShop
-                    ? const SellerProductFormScreen()
-                    : const OpenShopScreen(),
-              ),
-            ),
-            icon: Icon(hasShop ? Icons.add_box_outlined : Icons.storefront),
-            label: Text(hasShop ? 'เพิ่มสินค้า' : 'เปิดร้านค้า'),
+            onPressed: hasShop && !seller.isVerified
+                ? () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const OpenShopScreen()),
+                    )
+                : () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => hasShop
+                            ? const SellerProductFormScreen()
+                            : const OpenShopScreen(),
+                      ),
+                    ),
+            icon: Icon(hasShop
+                ? (seller.isVerified ? Icons.add_box_outlined : Icons.edit_note)
+                : Icons.storefront),
+            label: Text(hasShop
+                ? (seller.isVerified ? 'เพิ่มสินค้า' : 'แก้ไขคำขอเปิดร้าน')
+                : 'เปิดร้านค้า'),
             style: FilledButton.styleFrom(
               backgroundColor: accent,
               foregroundColor: Colors.white,
@@ -6460,6 +6762,51 @@ class SellerHeroCard extends StatelessWidget {
                   style: const TextStyle(color: Colors.white70, fontSize: 12.5),
                 ),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+void showSellerApprovalPending(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('ร้านค้ากำลังรออนุมัติ หลังอนุมัติแล้วจึงเพิ่มสินค้าได้'),
+    ),
+  );
+}
+
+class SellerApprovalPendingCard extends StatelessWidget {
+  const SellerApprovalPendingCard({super.key, required this.seller});
+
+  final SellerProfile seller;
+
+  @override
+  Widget build(BuildContext context) {
+    final isRejected =
+        seller.status == 'suspended' || seller.status == 'paused';
+    final message = isRejected
+        ? (seller.reviewNote.isEmpty
+            ? 'คำขอเปิดร้านยังไม่ผ่าน กรุณาตรวจสอบข้อมูลและส่งคำขอใหม่'
+            : 'คำขอเปิดร้านยังไม่ผ่าน: \${seller.reviewNote}')
+        : 'ร้านค้าส่งคำขอแล้วและกำลังรออนุมัติ เมื่ออนุมัติแล้วจะเพิ่มสินค้าและแสดงในหน้าหลักได้';
+    return CheckoutCard(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            isRejected ? Icons.error_outline : Icons.hourglass_top,
+            color: isRejected ? accent : const Color(0xFFE0A300),
+            size: 22,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(color: ink, fontSize: 13, height: 1.35),
             ),
           ),
         ],
@@ -7722,7 +8069,7 @@ class SellerOrderCard extends StatelessWidget {
     return 'สำเร็จแล้ว';
   }
 
-  void _advanceOrder(BuildContext context) {
+  Future<void> _advanceOrder(BuildContext context) async {
     if (order.status == 'รอจัดส่ง') {
       showModalBottomSheet<void>(
         context: context,
@@ -7733,7 +8080,7 @@ class SellerOrderCard extends StatelessWidget {
       return;
     }
 
-    appStore.updateOrderShipping(
+    await appStore.updateOrderShipping(
       orderId: order.id,
       status: nextStatus,
       carrier: order.carrier == 'ยังไม่ได้เลือกขนส่ง'
@@ -8031,23 +8378,23 @@ class _SellerOrderStatusSheetState extends State<SellerOrderStatusSheet> {
     super.dispose();
   }
 
-  void _confirm() {
+  Future<void> _confirm() async {
     if (widget.order.status == 'รอร้านยืนยัน') {
-      appStore.updateOrderShipping(
+      await appStore.updateOrderShipping(
         orderId: widget.order.id,
         status: 'รอจัดส่ง',
         carrier: 'ยังไม่ได้เลือกขนส่ง',
         trackingNumber: '',
       );
     } else if (widget.order.status == 'รอจัดส่ง') {
-      appStore.updateOrderShipping(
+      await appStore.updateOrderShipping(
         orderId: widget.order.id,
         status: 'ส่งแล้ว',
         carrier: selectedCarrier,
         trackingNumber: trackingController.text.trim(),
       );
     } else if (widget.order.status == 'ส่งแล้ว') {
-      appStore.updateOrderShipping(
+      await appStore.updateOrderShipping(
         orderId: widget.order.id,
         status: 'สำเร็จ',
       );
@@ -8302,7 +8649,7 @@ class SellerProductManageRow extends StatelessWidget {
               child: OutlinedButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) => const SellerProductFormScreen(),
+                    builder: (_) => SellerProductFormScreen(product: product),
                   ),
                 ),
                 style: OutlinedButton.styleFrom(
@@ -8331,14 +8678,15 @@ class SellerProductManageRow extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: OutlinedButton(
-                onPressed: () =>
-                    appStore.updateSellerProductStatus(product, 'แบบร่าง'),
+                onPressed: () async {
+                  await appStore.deleteSellerProduct(product);
+                },
                 style: OutlinedButton.styleFrom(
                   foregroundColor: muted,
                   side: const BorderSide(color: line),
                   visualDensity: VisualDensity.compact,
                 ),
-                child: const Text('แบบร่าง'),
+                child: const Text('ลบ'),
               ),
             ),
           ],
@@ -8743,13 +9091,18 @@ class OpenShopScreen extends StatefulWidget {
 }
 
 class _OpenShopScreenState extends State<OpenShopScreen> {
-  late final TextEditingController shopName;
-  late final TextEditingController category;
   late final TextEditingController ownerName;
   late final TextEditingController phone;
   late final TextEditingController address;
-  late final TextEditingController description;
-  late final TextEditingController pickupProvince;
+  late final TextEditingController bankAccountName;
+  late final TextEditingController bankAccountNumber;
+  late final TextEditingController bankName;
+  AddressArea? pickupArea;
+  UploadedShopFile? identityCardFile;
+  UploadedShopFile? bankBookFile;
+  Uint8List? identityCardPreview;
+  Uint8List? bankBookPreview;
+  bool isUploadingShopFile = false;
   final carriers = <String>{
     'Flash Express',
     'KEX',
@@ -8762,47 +9115,144 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
   void initState() {
     super.initState();
     final seller = appStore.sellerProfile;
-    shopName =
-        TextEditingController(text: seller?.shopName ?? 'NP Basics Store');
-    category = TextEditingController(text: seller?.category ?? 'แฟชั่น');
-    ownerName =
-        TextEditingController(text: seller?.ownerName ?? 'ผู้ขาย NP Market');
-    phone = TextEditingController(text: seller?.phone ?? '0987654321');
-    address = TextEditingController(
-        text: seller?.address ??
-            '789 หมู่ 5 ตำบลพระลับ อำเภอเมืองขอนแก่น จังหวัดขอนแก่น 40000');
-    description = TextEditingController(
-        text: seller?.description ??
-            'ร้านค้าพร้อมจัดส่ง สินค้าคัดคุณภาพ รองรับขนส่ง 5 บริษัท');
-    pickupProvince =
-        TextEditingController(text: seller?.pickupProvince ?? 'ขอนแก่น');
+    ownerName = TextEditingController(text: seller?.ownerName ?? '');
+    phone = TextEditingController(text: seller?.phone ?? '');
+    address = TextEditingController(text: seller?.address ?? '');
+    bankAccountName = TextEditingController(
+      text: seller?.bankAccountName.isNotEmpty == true
+          ? seller!.bankAccountName
+          : seller?.ownerName ?? '',
+    );
+    bankAccountNumber =
+        TextEditingController(text: seller?.bankAccountNumber ?? '');
+    bankName = TextEditingController(text: seller?.bankName ?? '');
+    if (seller != null &&
+        seller.pickupProvince.isNotEmpty &&
+        seller.pickupDistrict.isNotEmpty &&
+        seller.pickupSubDistrict.isNotEmpty &&
+        seller.pickupPostcode.isNotEmpty) {
+      pickupArea = AddressArea(
+        province: seller.pickupProvince,
+        district: seller.pickupDistrict,
+        subDistrict: seller.pickupSubDistrict,
+        postcode: seller.pickupPostcode,
+      );
+      address.text = cleanPickupDetail(address.text, pickupArea!);
+    }
   }
 
   @override
   void dispose() {
-    shopName.dispose();
-    category.dispose();
     ownerName.dispose();
     phone.dispose();
     address.dispose();
-    description.dispose();
-    pickupProvince.dispose();
+    bankAccountName.dispose();
+    bankAccountNumber.dispose();
+    bankName.dispose();
     super.dispose();
   }
 
-  void _saveShop() {
-    appStore.openSellerShop(SellerProfile(
-      shopName:
-          shopName.text.trim().isEmpty ? 'ร้านใหม่' : shopName.text.trim(),
-      category: category.text.trim().isEmpty ? 'ทั่วไป' : category.text.trim(),
-      ownerName: ownerName.text.trim(),
-      phone: phone.text.trim(),
-      address: address.text.trim(),
-      description: description.text.trim(),
-      pickupProvince: pickupProvince.text.trim(),
-      enabledCarriers: carriers.toList(),
-      isVerified: true,
-    ));
+  Future<void> _pickShopFile(String kind) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่สามารถอ่านไฟล์นี้ได้')),
+      );
+      return;
+    }
+    setState(() => isUploadingShopFile = true);
+    try {
+      final uploaded = await appStore.uploadSellerFile(
+        kind: kind,
+        fileName: file.name,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (kind == 'identity-card') {
+          identityCardFile = uploaded;
+          identityCardPreview = Uint8List.fromList(bytes);
+        }
+        if (kind == 'bank-book') {
+          bankBookFile = uploaded;
+          bankBookPreview = Uint8List.fromList(bytes);
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) setState(() => isUploadingShopFile = false);
+    }
+  }
+
+  Future<void> _saveShop() async {
+    final existingSeller = appStore.sellerProfile;
+    final isEditingShop = existingSeller?.id.isNotEmpty ?? false;
+    final missingRequired = [
+      ownerName,
+      phone,
+      address,
+      bankAccountName,
+      bankAccountNumber,
+      bankName,
+    ].any((controller) => controller.text.trim().isEmpty);
+    if (missingRequired ||
+        pickupArea == null ||
+        (!isEditingShop && identityCardFile == null) ||
+        (!isEditingShop && bankBookFile == null)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกข้อมูลร้านค้าที่จำเป็นให้ครบ')),
+      );
+      return;
+    }
+    final area = pickupArea!;
+    final pickupDetail = cleanPickupDetail(address.text, area);
+    final accountName = appStore.customerAccount?.nameOrEmail ?? '';
+    final requestDisplayName = ownerName.text.trim().isNotEmpty
+        ? ownerName.text.trim()
+        : (accountName.isNotEmpty ? accountName : 'ผู้ขอเปิดร้าน');
+    await appStore.openSellerShop(
+        SellerProfile(
+          id: existingSeller?.id ?? '',
+          shopName: existingSeller?.shopName.isNotEmpty == true
+              ? existingSeller!.shopName
+              : requestDisplayName,
+          category: existingSeller?.category.isNotEmpty == true
+              ? existingSeller!.category
+              : 'รอตั้งค่าหลังอนุมัติ',
+          ownerName: requestDisplayName,
+          phone: phone.text.trim(),
+          address: pickupDetail,
+          description: existingSeller?.description ?? '',
+          pickupProvince: area.province,
+          pickupDistrict: area.district,
+          pickupSubDistrict: area.subDistrict,
+          pickupPostcode: area.postcode,
+          enabledCarriers: carriers.toList(),
+          logoUrl: existingSeller?.logoUrl ?? '',
+          identityCardUrl:
+              identityCardFile?.url ?? existingSeller?.identityCardUrl ?? '',
+          bankBookUrl: bankBookFile?.url ?? existingSeller?.bankBookUrl ?? '',
+          bankAccountName: bankAccountName.text.trim(),
+          bankAccountNumber: bankAccountNumber.text.trim(),
+          bankName: bankName.text.trim(),
+          isVerified: existingSeller?.isVerified ?? false,
+        ),
+        identityCardUrl: identityCardFile?.url ?? '',
+        bankBookUrl: bankBookFile?.url ?? '',
+        identityCardPath: identityCardFile?.path ?? '',
+        bankBookPath: bankBookFile?.path ?? '');
+    if (!mounted) return;
     Navigator.of(context).pop();
   }
 
@@ -8849,103 +9299,59 @@ class _OpenShopScreenState extends State<OpenShopScreen> {
             ),
           SellerEditSection(
             children: [
-              SellerShopLogoRow(shopName: shopName.text),
-              SellerInlineTextField(
-                controller: shopName,
-                label: 'ชื่อร้าน',
-                hint: 'ไม่เกิน 35 ตัวอักษร',
-                required: true,
-              ),
-              SellerInlineTextField(
-                controller: category,
-                label: 'หมวดหมู่ร้าน',
-                hint: 'เช่น แฟชั่น, ของใช้ในบ้าน',
-                required: true,
-              ),
-              SellerInlineTextField(
-                controller: description,
-                label: 'รายละเอียดร้านค้า',
-                hint: 'แนะนำร้านค้าให้ลูกค้ารู้จัก',
-                maxLines: 3,
-              ),
-            ],
-          ),
-          SellerEditSection(
-            children: [
-              SellerInlineTextField(
-                controller: ownerName,
-                label: 'ชื่อผู้ขาย',
-                hint: 'ชื่อจริงหรือชื่อผู้ติดต่อ',
-                required: true,
-              ),
-              SellerInlineTextField(
-                controller: phone,
-                label: 'หมายเลขโทรศัพท์',
-                hint: 'เบอร์ติดต่อร้านค้า',
-                required: true,
-                keyboardType: TextInputType.phone,
-              ),
-              SellerInlineTextField(
-                controller: address,
-                label: 'Pickup Address',
-                hint: 'ที่อยู่รับสินค้า/ที่อยู่ร้าน',
-                required: true,
-                maxLines: 3,
-              ),
-              SellerInlineTextField(
-                controller: pickupProvince,
-                label: 'จังหวัดต้นทาง',
-                hint: 'จังหวัดที่ส่งจาก',
-                required: true,
-              ),
-            ],
-          ),
-          SellerEditSection(
-            children: [
-              SellerFormRow(
-                icon: Icons.local_shipping_outlined,
-                title: 'ตั้งค่าการจัดส่ง',
-                value: '${carriers.length} ช่องทาง',
-              ),
-              SellerFormRow(
-                icon: Icons.payments_outlined,
-                title: 'ตั้งค่าการชำระเงิน',
-                value: 'ชำระเงินปกติ',
-              ),
-              const SellerFormRow(
-                icon: Icons.notifications_none_outlined,
-                title: 'ตั้งค่าการแจ้งเตือน',
-                value: 'เปิดใช้งาน',
-              ),
-              const SellerFormRow(
-                icon: Icons.chat_bubble_outline,
-                title: 'ตั้งค่าการแชท',
-                value: 'เปิดใช้งาน',
+              SellerPickupAddressBlock(
+                ownerName: ownerName,
+                phone: phone,
+                detail: address,
+                bankAccountName: bankAccountName,
+                bankAccountNumber: bankAccountNumber,
+                bankName: bankName,
+                identityDocument: SellerDocumentUploadCard(
+                    icon: Icons.badge_outlined,
+                    title: 'สำเนาบัตรประชาชน',
+                    value: identityCardFile == null &&
+                            (appStore.sellerProfile?.identityCardUrl ?? '')
+                                .isEmpty
+                        ? 'เพิ่มไฟล์'
+                        : 'แนบแล้ว',
+                    previewBytes: identityCardPreview,
+                    previewUrl: appStore.sellerProfile?.identityCardUrl ?? '',
+                    onTap: isUploadingShopFile
+                        ? null
+                        : () => _pickShopFile('identity-card')),
+                bankBookDocument: SellerDocumentUploadCard(
+                    icon: Icons.account_balance_outlined,
+                    title: 'หน้าสมุดบัญชี',
+                    value: bankBookFile == null &&
+                            (appStore.sellerProfile?.bankBookUrl ?? '').isEmpty
+                        ? 'เพิ่มไฟล์'
+                        : 'แนบแล้ว',
+                    previewBytes: bankBookPreview,
+                    previewUrl: appStore.sellerProfile?.bankBookUrl ?? '',
+                    onTap: isUploadingShopFile
+                        ? null
+                        : () => _pickShopFile('bank-book')),
+                area: pickupArea,
+                areaText: pickupArea == null
+                    ? 'จังหวัด, เขต/อำเภอ, แขวง/ตำบล, รหัสไปรษณีย์'
+                    : pickupArea!.displayText,
+                hasArea: pickupArea != null,
+                onSelectArea: () async {
+                  final value = await Navigator.of(context).push<AddressArea>(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          AreaSelectionScreen(selectedArea: pickupArea),
+                    ),
+                  );
+                  if (value != null) {
+                    setState(() {
+                      pickupArea = value;
+                      address.text = cleanPickupDetail(address.text, value);
+                    });
+                  }
+                },
               ),
             ],
-          ),
-          Container(
-            margin: const EdgeInsets.only(top: 8),
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            color: Colors.white,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'ขนส่งที่เปิดใช้',
-                  style: TextStyle(color: ink, fontWeight: FontWeight.w900),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final carrier in carriers)
-                      ProductMiniTag(label: carrier),
-                  ],
-                ),
-              ],
-            ),
           ),
         ],
       ),
@@ -9086,7 +9492,9 @@ class SellerShopLogoRow extends StatelessWidget {
 }
 
 class SellerProductFormScreen extends StatefulWidget {
-  const SellerProductFormScreen({super.key});
+  const SellerProductFormScreen({super.key, this.product});
+
+  final Product? product;
 
   @override
   State<SellerProductFormScreen> createState() =>
@@ -9094,25 +9502,45 @@ class SellerProductFormScreen extends StatefulWidget {
 }
 
 class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
-  final name = TextEditingController(text: 'เสื้อยืดคอตตอนพรีเมียม ใส่สบาย');
-  final category = TextEditingController(text: 'แฟชั่น');
-  final price = TextEditingController(text: '199');
-  final originalPrice = TextEditingController(text: '290');
-  final stock = TextEditingController(text: '120');
-  final imageUrl = TextEditingController(
-      text:
-          'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800');
+  final name = TextEditingController();
+  final category = TextEditingController();
+  final price = TextEditingController();
+  final originalPrice = TextEditingController();
+  final stock = TextEditingController();
+  final imageUrl = TextEditingController();
   final videoUrl = TextEditingController();
   final sizeChartUrl = TextEditingController();
-  final sku = TextEditingController(text: 'NP-SKU-001');
-  final weight = TextEditingController(text: '0.3');
-  final parcelSize = TextEditingController(text: '20 x 15 x 5 cm');
-  final shipFrom = TextEditingController(text: 'ขอนแก่น');
-  final colors = TextEditingController(text: 'ขาว, ดำ, เทา');
-  final sizes = TextEditingController(text: 'S, M, L, XL');
-  final description = TextEditingController(
-      text:
-          'สินค้าพร้อมจัดส่ง รายละเอียดครบ รองรับการเลือกตัวเลือกสินค้าและขนส่งในแอป');
+  final sku = TextEditingController();
+  final weight = TextEditingController();
+  final parcelSize = TextEditingController();
+  final shipFrom = TextEditingController();
+  final colors = TextEditingController();
+  final sizes = TextEditingController();
+  final description = TextEditingController();
+  String imageFileName = '';
+  String videoFileName = '';
+  bool isSaving = false;
+  bool isUploadingImage = false;
+  bool isUploadingVideo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final product = widget.product;
+    if (product == null) return;
+    name.text = product.name;
+    category.text = product.category;
+    price.text = product.price.toStringAsFixed(product.price % 1 == 0 ? 0 : 2);
+    originalPrice.text = product.originalPrice
+        .toStringAsFixed(product.originalPrice % 1 == 0 ? 0 : 2);
+    stock.text = product.stock.toString();
+    imageUrl.text = product.imageUrl;
+    videoUrl.text = product.videoUrl;
+    sizeChartUrl.text = product.sizeChartImageUrl ?? '';
+    shipFrom.text = product.location;
+    colors.text = product.colorOptions.join(', ');
+    sizes.text = product.sizeOptions.join(', ');
+  }
 
   @override
   void dispose() {
@@ -9134,47 +9562,150 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
     super.dispose();
   }
 
+  Future<void> _pickProductMedia(String kind) async {
+    final seller = appStore.sellerProfile;
+    if (seller == null || !seller.isVerified) {
+      showSellerApprovalPending(context);
+      return;
+    }
+    final isVideo = kind == 'video';
+    setState(() {
+      if (isVideo) {
+        isUploadingVideo = true;
+      } else {
+        isUploadingImage = true;
+      }
+    });
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: isVideo
+            ? const ['mp4', 'mov', 'webm']
+            : const ['jpg', 'jpeg', 'png', 'webp', 'heic'],
+        withData: true,
+      );
+      final file = result?.files.single;
+      final bytes = file?.bytes;
+      if (file == null || bytes == null) return;
+      final url = await appStore.uploadProductMedia(
+        shopId: seller.id,
+        kind: kind,
+        fileName: file.name,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (isVideo) {
+          videoUrl.text = url;
+          videoFileName = file.name;
+        } else {
+          imageUrl.text = url;
+          imageFileName = file.name;
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('แนบไฟล์ไม่สำเร็จ: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          if (isVideo) {
+            isUploadingVideo = false;
+          } else {
+            isUploadingImage = false;
+          }
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final seller = appStore.sellerProfile;
-    void saveProduct() {
+    Future<void> saveProduct() async {
+      if (isSaving) return;
       if (seller == null) return;
+      if (!seller.isVerified) {
+        showSellerApprovalPending(context);
+        return;
+      }
       final parsedPrice = double.tryParse(price.text.trim()) ?? 0;
       final parsedOriginal =
           double.tryParse(originalPrice.text.trim()) ?? parsedPrice;
       final parsedStock = int.tryParse(stock.text.trim()) ?? 0;
+      final missingRequired = name.text.trim().isEmpty ||
+          category.text.trim().isEmpty ||
+          parsedPrice <= 0 ||
+          parsedStock <= 0 ||
+          imageUrl.text.trim().isEmpty ||
+          shipFrom.text.trim().isEmpty;
+      if (missingRequired) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('กรุณากรอกข้อมูลสินค้าที่จำเป็นให้ครบ')),
+        );
+        return;
+      }
       final discount = parsedOriginal > parsedPrice && parsedOriginal > 0
           ? (((parsedOriginal - parsedPrice) / parsedOriginal) * 100).round()
           : 0;
-      appStore.addSellerProduct(Product(
-        id: 'seller-${DateTime.now().millisecondsSinceEpoch}',
-        name: name.text.trim().isEmpty ? 'สินค้าใหม่' : name.text.trim(),
+      setState(() => isSaving = true);
+      final product = Product(
+        id: widget.product?.id ??
+            'seller-${DateTime.now().millisecondsSinceEpoch}',
+        shopId: seller.id,
+        name: name.text.trim(),
         shopName: seller.shopName,
-        category: category.text.trim().isEmpty
-            ? seller.category
-            : category.text.trim(),
-        price: parsedPrice <= 0 ? 1 : parsedPrice,
+        category: category.text.trim(),
+        price: parsedPrice,
         originalPrice: parsedOriginal <= 0 ? parsedPrice : parsedOriginal,
-        rating: 0,
-        soldCount: 0,
-        imageUrl: imageUrl.text.trim().isEmpty
-            ? 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800'
-            : imageUrl.text.trim(),
-        badge: 'สินค้าใหม่',
-        location:
-            shipFrom.text.trim().isEmpty ? 'ขอนแก่น' : shipFrom.text.trim(),
+        rating: widget.product?.rating ?? 0,
+        soldCount: widget.product?.soldCount ?? 0,
+        imageUrl: imageUrl.text.trim(),
+        badge: '',
+        location: shipFrom.text.trim(),
         shippingLabel: 'ส่งฟรี',
-        serviceLabel: 'ร้านใหม่',
-        promoLabel: 'โค้ดร้าน',
+        serviceLabel: seller.shopName,
+        promoLabel: '',
         discountPercent: discount,
         isVideo: videoUrl.text.trim().isNotEmpty,
         videoViews: videoUrl.text.trim().isEmpty ? '' : 'ใหม่',
-        stock: parsedStock <= 0 ? 1 : parsedStock,
+        videoUrl: videoUrl.text.trim(),
+        stock: parsedStock,
         colorOptions: splitOptions(colors.text),
         sizeOptions: splitOptions(sizes.text),
         sizeChartImageUrl:
             sizeChartUrl.text.trim().isEmpty ? null : sizeChartUrl.text.trim(),
-      ));
+      );
+      try {
+        if (widget.product == null) {
+          await appStore.addSellerProduct(
+            product,
+            description: description.text.trim(),
+            sku: sku.text.trim(),
+            weightKg: double.tryParse(weight.text.trim()) ?? 0,
+            parcelSize: parcelSize.text.trim(),
+          );
+        } else {
+          await appStore.updateSellerProduct(
+            product,
+            description: description.text.trim(),
+            sku: sku.text.trim(),
+            weightKg: double.tryParse(weight.text.trim()) ?? 0,
+            parcelSize: parcelSize.text.trim(),
+          );
+        }
+      } catch (error) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('บันทึกสินค้าไม่สำเร็จ: $error')),
+        );
+        return;
+      } finally {
+        if (mounted) setState(() => isSaving = false);
+      }
+      if (!context.mounted) return;
       Navigator.of(context).pop();
     }
 
@@ -9187,7 +9718,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
         elevation: 0,
         actions: [
           TextButton(
-            onPressed: seller == null ? null : saveProduct,
+            onPressed:
+                seller == null || !seller.isVerified ? null : saveProduct,
             child: const Text('ส่ง'),
           ),
         ],
@@ -9195,7 +9727,24 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(0, 0, 0, 96),
         children: [
-          SellerMediaSection(imageUrl: imageUrl, videoUrl: videoUrl),
+          SellerMediaSection(
+            imageUrl: imageUrl,
+            videoUrl: videoUrl,
+            imageFileName: imageFileName,
+            videoFileName: videoFileName,
+            isUploadingImage: isUploadingImage,
+            isUploadingVideo: isUploadingVideo,
+            onPickImage: () => _pickProductMedia('image'),
+            onPickVideo: () => _pickProductMedia('video'),
+            onClearImage: () => setState(() {
+              imageUrl.clear();
+              imageFileName = '';
+            }),
+            onClearVideo: () => setState(() {
+              videoUrl.clear();
+              videoFileName = '';
+            }),
+          ),
           SellerEditSection(
             children: [
               SellerInlineTextField(
@@ -9215,31 +9764,28 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
           ),
           SellerEditSection(
             children: [
-              SellerFormRow(
-                icon: Icons.list_alt_outlined,
-                title: 'หมวดหมู่',
-                value: category.text,
-              ),
-              SellerFormRow(
-                icon: Icons.image_outlined,
-                title: 'คลังสื่อสินค้า',
-                value: 'รูปภาพ/วิดีโอ',
-              ),
-              SellerFieldGrid(
-                children: [
-                  SellerCompactFormField(
-                    controller: imageUrl,
-                    label: 'ลิงก์รูปสินค้า',
-                    hint: 'URL รูปหลัก',
-                    keyboardType: TextInputType.url,
-                  ),
-                  SellerCompactFormField(
-                    controller: videoUrl,
-                    label: 'ลิงก์วิดีโอ',
-                    hint: 'ถ้ามี',
-                    keyboardType: TextInputType.url,
-                  ),
-                ],
+              DropdownButtonFormField<String>(`r`n                initialValue: shopeeProductCategories.contains(category.text)
+                    ? category.text
+                    : null,
+                items: shopeeProductCategories
+                    .map(
+                      (item) => DropdownMenuItem(
+                        value: item,
+                        child: Text(item, overflow: TextOverflow.ellipsis),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => category.text = value);
+                },
+                decoration: const InputDecoration(
+                  labelText: 'หมวดหมู่สินค้า',
+                  prefixIcon: Icon(Icons.list_alt_outlined),
+                  filled: true,
+                  fillColor: Color(0xFFF6F6F6),
+                  border: InputBorder.none,
+                ),
               ),
             ],
           ),
@@ -9344,7 +9890,8 @@ class _SellerProductFormScreenState extends State<SellerProductFormScreen> {
           padding: const EdgeInsets.all(10),
           color: Colors.white,
           child: FilledButton(
-            onPressed: seller == null ? null : saveProduct,
+            onPressed:
+                seller == null || !seller.isVerified ? null : saveProduct,
             style: FilledButton.styleFrom(
               backgroundColor: accent,
               foregroundColor: Colors.white,
@@ -9365,10 +9912,26 @@ class SellerMediaSection extends StatelessWidget {
     super.key,
     required this.imageUrl,
     required this.videoUrl,
+    required this.imageFileName,
+    required this.videoFileName,
+    required this.isUploadingImage,
+    required this.isUploadingVideo,
+    required this.onPickImage,
+    required this.onPickVideo,
+    required this.onClearImage,
+    required this.onClearVideo,
   });
 
   final TextEditingController imageUrl;
   final TextEditingController videoUrl;
+  final String imageFileName;
+  final String videoFileName;
+  final bool isUploadingImage;
+  final bool isUploadingVideo;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickVideo;
+  final VoidCallback onClearImage;
+  final VoidCallback onClearVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -9383,9 +9946,20 @@ class SellerMediaSection extends StatelessWidget {
               SellerMediaTile(
                 label: 'ภาพปก',
                 imageUrl: imageUrl.text,
+                fileName: imageFileName,
+                loading: isUploadingImage,
+                onTap: onPickImage,
+                onClear: imageUrl.text.trim().isEmpty ? null : onClearImage,
               ),
               const SizedBox(width: 10),
-              const SellerMediaTile(label: '+ เพิ่ม\nรูปภาพ/วิดีโอ'),
+              SellerMediaTile(
+                label: 'วิดีโอ',
+                icon: Icons.play_circle_outline,
+                fileName: videoFileName,
+                loading: isUploadingVideo,
+                onTap: onPickVideo,
+                onClear: videoUrl.text.trim().isEmpty ? null : onClearVideo,
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -9405,59 +9979,118 @@ class SellerMediaSection extends StatelessWidget {
 }
 
 class SellerMediaTile extends StatelessWidget {
-  const SellerMediaTile({super.key, required this.label, this.imageUrl});
+  const SellerMediaTile({
+    super.key,
+    required this.label,
+    this.imageUrl,
+    this.fileName = '',
+    this.icon = Icons.add_photo_alternate_outlined,
+    this.loading = false,
+    this.onTap,
+    this.onClear,
+  });
 
   final String label;
   final String? imageUrl;
+  final String fileName;
+  final IconData icon;
+  final bool loading;
+  final VoidCallback? onTap;
+  final VoidCallback? onClear;
 
   @override
   Widget build(BuildContext context) {
     final hasImage = imageUrl != null && imageUrl!.trim().isNotEmpty;
-    return Container(
-      width: 76,
-      height: 76,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(
-          color: accent,
-          style: hasImage ? BorderStyle.solid : BorderStyle.solid,
+    return InkWell(
+      onTap: loading ? null : onTap,
+      child: Container(
+        width: 76,
+        height: 76,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border.all(
+            color: accent,
+            style: hasImage ? BorderStyle.solid : BorderStyle.solid,
+          ),
         ),
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (hasImage)
-            Image.network(
-              imageUrl!,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  const Icon(Icons.image_outlined, color: accent, size: 28),
-            )
-          else
-            Center(
-              child: Text(
-                label,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: accent, fontSize: 12, fontWeight: FontWeight.w700),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (hasImage)
+              Image.network(
+                imageUrl!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const Icon(Icons.image_outlined, color: accent, size: 28),
+              )
+            else
+              Center(
+                child: loading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : fileName.isEmpty
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(icon, color: accent, size: 21),
+                              const SizedBox(height: 3),
+                              Text(
+                                label,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: accent,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700),
+                              ),
+                            ],
+                          )
+                        : Text(
+                            fileName,
+                            textAlign: TextAlign.center,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: accent,
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w700),
+                          ),
               ),
-            ),
-          if (hasImage)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 2),
-                color: Colors.black.withValues(alpha: 0.42),
-                child: Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 11),
+            if (hasImage)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  color: Colors.black.withValues(alpha: 0.42),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
+                  ),
                 ),
               ),
-            ),
-        ],
+            if (onClear != null)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: GestureDetector(
+                  onTap: onClear,
+                  child: Container(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    padding: const EdgeInsets.all(2),
+                    child:
+                        const Icon(Icons.close, color: Colors.white, size: 14),
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -9475,20 +10108,7 @@ class SellerCompactUrlField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      keyboardType: TextInputType.url,
-      style: const TextStyle(color: ink, fontSize: 12.5),
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: label,
-        hintStyle: const TextStyle(color: muted),
-        filled: true,
-        fillColor: const Color(0xFFF6F6F6),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-        border: InputBorder.none,
-      ),
-    );
+    return const SizedBox.shrink();
   }
 }
 
@@ -9754,6 +10374,354 @@ class SellerFormRow extends StatelessWidget {
   }
 }
 
+class SellerDocumentUploadCard extends StatelessWidget {
+  const SellerDocumentUploadCard({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.previewBytes,
+    required this.previewUrl,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final Uint8List? previewBytes;
+  final String previewUrl;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final attached = previewBytes != null || previewUrl.isNotEmpty;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 9, 14, 9),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFEEF0),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: attached ? accent : line),
+              ),
+              child: attached
+                  ? (previewBytes != null
+                      ? Image.memory(previewBytes!, fit: BoxFit.cover)
+                      : Image.network(
+                          previewUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                              Icon(icon, color: accent, size: 22),
+                        ))
+                  : Icon(icon, color: accent, size: 22),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: ink,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    attached ? 'แตะเพื่อเปลี่ยนรูป' : 'แตะเพื่อเพิ่มรูป',
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              decoration: BoxDecoration(
+                color: attached ? softAccent : Colors.white,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: attached ? accent : line),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    value,
+                    style: TextStyle(
+                      color: attached ? accent : muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Icon(
+                    attached ? Icons.check_circle : Icons.add_photo_alternate,
+                    color: attached ? accent : muted,
+                    size: 16,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SellerPickupAddressBlock extends StatelessWidget {
+  const SellerPickupAddressBlock({
+    super.key,
+    required this.ownerName,
+    required this.phone,
+    required this.detail,
+    required this.bankAccountName,
+    required this.bankAccountNumber,
+    required this.bankName,
+    required this.identityDocument,
+    required this.bankBookDocument,
+    required this.area,
+    required this.areaText,
+    required this.hasArea,
+    required this.onSelectArea,
+  });
+
+  final TextEditingController ownerName;
+  final TextEditingController phone;
+  final TextEditingController detail;
+  final TextEditingController bankAccountName;
+  final TextEditingController bankAccountNumber;
+  final TextEditingController bankName;
+  final Widget identityDocument;
+  final Widget bankBookDocument;
+  final AddressArea? area;
+  final String areaText;
+  final bool hasArea;
+  final VoidCallback onSelectArea;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 12, 10, 6),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border.all(color: line),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: const [
+                Icon(Icons.local_shipping_outlined, color: accent, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'ข้อมูลร้านค้า',
+                  style: TextStyle(
+                      color: ink, fontSize: 16, fontWeight: FontWeight.w900),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            identityDocument,
+            SellerInlineTextField(
+              controller: ownerName,
+              label: 'ชื่อ-นามสกุล',
+              hint: 'ชื่อจริงและนามสกุลของผู้ขอเปิดร้าน',
+              required: true,
+            ),
+            SellerInlineTextField(
+              controller: phone,
+              label: 'หมายเลขโทรศัพท์',
+              hint: 'เบอร์ติดต่อร้านค้า',
+              required: true,
+              keyboardType: TextInputType.phone,
+            ),
+            SellerInlineTextField(
+              controller: bankAccountName,
+              label: 'ชื่อบัญชี',
+              hint: 'ชื่อบัญชีธนาคารสำหรับรับเงิน',
+              required: true,
+            ),
+            SellerInlineTextField(
+              controller: bankAccountNumber,
+              label: 'เลขบัญชี',
+              hint: 'เลขบัญชีธนาคาร',
+              required: true,
+              keyboardType: TextInputType.number,
+            ),
+            SellerInlineTextField(
+              controller: bankName,
+              label: 'ธนาคาร',
+              hint: 'ชื่อธนาคาร',
+              required: true,
+            ),
+            bankBookDocument,
+            SellerInlineTextField(
+              controller: detail,
+              label: 'รายละเอียดเพิ่มเติม',
+              hint: 'บ้านเลขที่ อาคาร หมู่บ้าน ซอย ถนน หรือจุดสังเกต',
+              required: true,
+              maxLines: 3,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: InkWell(
+                onTap: onSelectArea,
+                borderRadius: BorderRadius.circular(10),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F8F8),
+                    border: Border.all(color: hasArea ? accent : line),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Icon(Icons.place_outlined,
+                            color: hasArea ? accent : muted, size: 20),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: hasArea && area != null
+                            ? Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: [
+                                  _AreaChip(
+                                      label: 'จังหวัด', value: area!.province),
+                                  _AreaChip(
+                                      label: 'เขต/อำเภอ',
+                                      value: area!.district),
+                                  _AreaChip(
+                                      label: 'แขวง/ตำบล',
+                                      value: area!.subDistrict),
+                                  _AreaChip(
+                                      label: 'ไปรษณีย์', value: area!.postcode),
+                                ],
+                              )
+                            : Text(
+                                areaText,
+                                style: const TextStyle(
+                                  color: muted,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                      ),
+                      const Icon(Icons.chevron_right, color: muted),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AreaChip extends StatelessWidget {
+  const _AreaChip({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: line),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: const TextStyle(color: ink, fontSize: 12.5, height: 1.15),
+          children: [
+            TextSpan(
+              text: '$label ',
+              style: const TextStyle(color: muted, fontWeight: FontWeight.w600),
+            ),
+            TextSpan(
+              text: value,
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SellerUploadRow extends StatelessWidget {
+  const SellerUploadRow({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final attached = value.contains('แนบแล้ว');
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 14, 10, 14),
+        child: Row(
+          children: [
+            Icon(icon, color: attached ? accent : muted, size: 22),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                    color: ink, fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+            ),
+            Text(
+              value,
+              style: TextStyle(
+                color: attached ? accent : muted,
+                fontSize: 13,
+                fontWeight: attached ? FontWeight.w800 : FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(
+              attached ? Icons.check_circle : Icons.upload_file_outlined,
+              color: attached ? accent : muted,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class SellerTextField extends StatelessWidget {
   const SellerTextField({
     super.key,
@@ -9848,6 +10816,453 @@ class OrderSuccessScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+class NotificationsScreen extends StatefulWidget {
+  const NotificationsScreen({super.key});
+
+  @override
+  State<NotificationsScreen> createState() => _NotificationsScreenState();
+}
+
+class _NotificationsScreenState extends State<NotificationsScreen> {
+  var selectedCategory = 'อัปเดตสำคัญ';
+  final readIds = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appStore.loadSellerWorkspace();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: appStore,
+      builder: (context, _) {
+        final items = _buildNotificationItems();
+        final categories = [
+          _NotificationCategory('อัปเดตสำคัญ', Icons.thumb_up_alt_outlined),
+          _NotificationCategory('ร้านค้า', Icons.storefront_outlined),
+          _NotificationCategory('คำสั่งซื้อ', Icons.receipt_long_outlined),
+          _NotificationCategory('ขนส่ง', Icons.local_shipping_outlined),
+          _NotificationCategory('ระบบ', Icons.security_outlined),
+        ];
+        final filtered = selectedCategory == 'อัปเดตสำคัญ'
+            ? items
+            : items.where((item) => item.category == selectedCategory).toList();
+        return Scaffold(
+          backgroundColor: const Color(0xFFF6F6F6),
+          appBar: AppBar(
+            title: const Text('การแจ้งเตือน'),
+            centerTitle: true,
+            backgroundColor: Colors.white,
+            foregroundColor: ink,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.shopping_cart_outlined),
+                onPressed: () => Navigator.of(context).pushNamed('/cart'),
+              ),
+              IconButton(
+                icon: const Icon(Icons.chat_bubble_outline),
+                onPressed: () => Navigator.of(context).pushNamed('/me/chat'),
+              ),
+            ],
+          ),
+          body: RefreshIndicator(
+            onRefresh: appStore.loadSellerWorkspace,
+            color: accent,
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                Dismissible(
+                  key: const ValueKey('notification-permission-banner'),
+                  direction: DismissDirection.endToStart,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    color: const Color(0xFFFFF8DE),
+                    child: Row(
+                      children: [
+                        const CircleAvatar(
+                          radius: 15,
+                          backgroundColor: Color(0xFFFFA51F),
+                          child: Icon(Icons.notifications_active,
+                              color: Colors.white, size: 17),
+                        ),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text(
+                            'เปิดการแจ้งเตือนเพื่อรับอัปเดตคำสั่งซื้อ ร้านค้า และการจัดส่ง',
+                            style: TextStyle(
+                                color: ink, fontSize: 13.5, height: 1.3),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {},
+                          child: const Text('เปิดใช้งาน'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'อัปเดตล่าสุด',
+                          style: TextStyle(
+                              color: ink,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => setState(() {
+                          readIds.addAll(items.map((item) => item.id));
+                        }),
+                        child: const Text('อ่านทั้งหมด'),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  height: 96,
+                  child: ListView.separated(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    scrollDirection: Axis.horizontal,
+                    itemBuilder: (context, index) {
+                      final category = categories[index];
+                      final selected = category.label == selectedCategory;
+                      final unreadCount = items
+                          .where((item) =>
+                              (category.label == 'อัปเดตสำคัญ' ||
+                                  item.category == category.label) &&
+                              !readIds.contains(item.id))
+                          .length;
+                      return _NotificationCategoryTab(
+                        category: category,
+                        selected: selected,
+                        count: unreadCount,
+                        onTap: () =>
+                            setState(() => selectedCategory = category.label),
+                      );
+                    },
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemCount: categories.length,
+                  ),
+                ),
+                const Divider(height: 1),
+                if (!appStore.isSignedIn)
+                  EmptyState(
+                    icon: Icons.notifications_none,
+                    title: 'เข้าสู่ระบบเพื่อดูแจ้งเตือน',
+                    message:
+                        'รายการแจ้งเตือนของคำสั่งซื้อและร้านค้าจะแสดงหลังเข้าสู่ระบบ',
+                    actionLabel: 'เข้าสู่ระบบ',
+                    onAction: () => Navigator.of(context).pushNamed('/auth'),
+                  )
+                else if (filtered.isEmpty)
+                  const EmptyState(
+                    icon: Icons.notifications_none,
+                    title: 'ยังไม่มีอัปเดต',
+                    message:
+                        'เมื่อมีคำสั่งซื้อ การอนุมัติร้านค้า หรือเลขพัสดุ ระบบจะแสดงที่นี่',
+                  )
+                else
+                  for (final item in filtered)
+                    _NotificationTile(
+                      item: item,
+                      unread: !readIds.contains(item.id),
+                      onTap: () {
+                        setState(() => readIds.add(item.id));
+                        item.onTap?.call(context);
+                      },
+                    ),
+                const SizedBox(height: 18),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  List<_NotificationItem> _buildNotificationItems() {
+    final items = <_NotificationItem>[];
+    final shop = appStore.sellerProfile;
+    if (shop != null) {
+      final status = shop.status;
+      final title = status == 'active'
+          ? 'ร้านค้าของคุณเปิดขายแล้ว'
+          : status == 'paused' || status == 'suspended'
+              ? 'คำขอเปิดร้านต้องแก้ไข'
+              : 'ส่งคำขอเปิดร้านแล้ว';
+      final body = status == 'active'
+          ? '${shop.shopName} ได้รับอนุมัติแล้ว เพิ่มสินค้าและเริ่มขายได้ทันที'
+          : status == 'paused' || status == 'suspended'
+              ? (shop.reviewNote.isEmpty
+                  ? 'แอดมินขอให้แก้ไขข้อมูลหรือเอกสารร้านค้า'
+                  : shop.reviewNote)
+              : '${shop.shopName} อยู่ระหว่างรอแอดมินตรวจสอบ';
+      items.add(
+        _NotificationItem(
+          id: 'shop-${shop.id}-${shop.status}',
+          category: 'ร้านค้า',
+          title: title,
+          body: body,
+          time: DateTime.now(),
+          icon: Icons.storefront,
+          color: status == 'active' ? Colors.green : accent,
+          onTap: (context) => Navigator.of(context).pushNamed('/seller'),
+        ),
+      );
+    }
+
+    for (final order in appStore.orders) {
+      final firstItem = order.items.isEmpty ? null : order.items.first;
+      final updated = order.updatedAt ?? order.createdAt;
+      items.add(
+        _NotificationItem(
+          id: 'order-${order.id}-${order.status}',
+          category: 'คำสั่งซื้อ',
+          title: 'อัปเดตคำสั่งซื้อ ${order.id}',
+          body: firstItem == null
+              ? order.status
+              : '${firstItem.product.name} • ${order.status}',
+          time: updated,
+          icon: Icons.receipt_long,
+          color: accent,
+          onTap: (context) => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => OrderDetailScreen(order: order)),
+          ),
+        ),
+      );
+      if (order.trackingNumber.isNotEmpty) {
+        items.add(
+          _NotificationItem(
+            id: 'shipping-${order.id}-${order.trackingNumber}',
+            category: 'ขนส่ง',
+            title: 'พัสดุเริ่มจัดส่งแล้ว',
+            body: '${order.carrier} • ${order.trackingNumber}',
+            time: updated,
+            icon: Icons.local_shipping,
+            color: const Color(0xFF00A889),
+            onTap: (context) => Navigator.of(context).push(
+              MaterialPageRoute(
+                  builder: (_) => OrderDetailScreen(order: order)),
+            ),
+          ),
+        );
+      }
+    }
+
+    if (appStore.customerAccount != null) {
+      items.add(
+        _NotificationItem(
+          id: 'system-login-${appStore.customerAccount!.id}',
+          category: 'ระบบ',
+          title: 'แจ้งเตือนการเข้าสู่ระบบ',
+          body:
+              'บัญชี ${appStore.customerAccount!.nameOrEmail} กำลังใช้งานบนอุปกรณ์นี้',
+          time: DateTime.now(),
+          icon: Icons.shield_outlined,
+          color: const Color(0xFFD00245),
+        ),
+      );
+    }
+
+    items.sort((a, b) => b.time.compareTo(a.time));
+    return items;
+  }
+}
+
+class _NotificationCategory {
+  const _NotificationCategory(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+}
+
+class _NotificationItem {
+  const _NotificationItem({
+    required this.id,
+    required this.category,
+    required this.title,
+    required this.body,
+    required this.time,
+    required this.icon,
+    required this.color,
+    this.onTap,
+  });
+
+  final String id;
+  final String category;
+  final String title;
+  final String body;
+  final DateTime time;
+  final IconData icon;
+  final Color color;
+  final void Function(BuildContext context)? onTap;
+}
+
+class _NotificationCategoryTab extends StatelessWidget {
+  const _NotificationCategoryTab({
+    required this.category,
+    required this.selected,
+    required this.count,
+    required this.onTap,
+  });
+
+  final _NotificationCategory category;
+  final bool selected;
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: SizedBox(
+        width: 78,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Badge.count(
+              isLabelVisible: count > 0,
+              count: count > 99 ? 99 : count,
+              backgroundColor: accent,
+              child: Icon(
+                category.icon,
+                color: selected ? accent : muted,
+                size: 25,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              category.label,
+              maxLines: 2,
+              textAlign: TextAlign.center,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: selected ? accent : muted,
+                fontSize: 11.5,
+                height: 1.15,
+                fontWeight: selected ? FontWeight.w900 : FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              height: 2,
+              width: 52,
+              color: selected ? accent : Colors.transparent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationTile extends StatelessWidget {
+  const _NotificationTile({
+    required this.item,
+    required this.unread,
+    required this.onTap,
+  });
+
+  final _NotificationItem item;
+  final bool unread;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: unread ? const Color(0xFFFFF7F8) : Colors.white,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 24,
+                backgroundColor: item.color,
+                child: Icon(item.icon, color: Colors.white, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            item.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: ink,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 15.5,
+                            ),
+                          ),
+                        ),
+                        if (unread)
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              color: accent,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      item.body,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: muted,
+                        height: 1.35,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Text(
+                      _formatNotificationTime(item.time),
+                      style: TextStyle(
+                        color: muted.withValues(alpha: 0.75),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _formatNotificationTime(DateTime value) {
+  final now = DateTime.now();
+  final local = value.toLocal();
+  final difference = now.difference(local);
+  if (difference.inMinutes < 1) return 'เมื่อสักครู่';
+  if (difference.inHours < 1) return '${difference.inMinutes} นาทีที่แล้ว';
+  if (difference.inDays < 1) return '${difference.inHours} ชั่วโมงที่แล้ว';
+  return '${local.day.toString().padLeft(2, '0')}-${local.month.toString().padLeft(2, '0')}-${local.year} ${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
 }
 
 class OrdersScreen extends StatefulWidget {
@@ -10329,11 +11744,15 @@ class EmptyState extends StatelessWidget {
       {super.key,
       required this.icon,
       required this.title,
-      required this.message});
+      required this.message,
+      this.actionLabel,
+      this.onAction});
 
   final IconData icon;
   final String title;
   final String message;
+  final String? actionLabel;
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -10352,6 +11771,14 @@ class EmptyState extends StatelessWidget {
             Text(message,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: muted)),
+            if (actionLabel != null && onAction != null) ...[
+              const SizedBox(height: 14),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: accent),
+                onPressed: onAction,
+                child: Text(actionLabel!),
+              ),
+            ],
           ],
         ),
       ),
@@ -10686,6 +12113,8 @@ class MeScreen extends StatefulWidget {
 }
 
 class _MeScreenState extends State<MeScreen> {
+  bool _showLoginPrompt = true;
+
   @override
   void initState() {
     super.initState();
@@ -10705,19 +12134,21 @@ class _MeScreenState extends State<MeScreen> {
     final seller = appStore.sellerProfile;
     final orderCount = appStore.orders.length;
     final suggested = marketplaceProducts.take(4).toList();
+    final isSignedIn = appStore.isAuthenticated;
 
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.fromLTRB(0, 0, 0, 22),
         children: [
           MeProfileHeader(seller: seller),
-          const MeVipStrip(),
-          const SizedBox(height: 10),
-          const LoginSecurityCard(),
+          if (!isSignedIn && _showLoginPrompt) ...[
+            const SizedBox(height: 10),
+            LoginSecurityCard(
+              onClose: () => setState(() => _showLoginPrompt = false),
+            ),
+          ],
           const SizedBox(height: 10),
           MeOrderPanel(orderCount: orderCount),
-          const SizedBox(height: 10),
-          const MePromoCampaignPanel(),
           const SizedBox(height: 10),
           const MeShortcutPanel(
             title: 'My Wallet',
@@ -10738,33 +12169,6 @@ class _MeScreenState extends State<MeScreen> {
                   icon: Icons.confirmation_number_outlined,
                   label: 'โค้ดส่วนลด',
                   route: '/me/vouchers'),
-            ],
-          ),
-          const SizedBox(height: 10),
-          const MeTwoColumnPanel(
-            title: 'บริการทางการเงิน',
-            action: 'ดูเพิ่มเติม',
-            items: [
-              MeMenuItem(
-                  icon: Icons.savings_outlined,
-                  label: 'เครดิตร้านค้า',
-                  route: '/me/vouchers',
-                  trailing: 'ส่วนลดและสิทธิพิเศษ'),
-              MeMenuItem(
-                  icon: Icons.phone_android_outlined,
-                  label: 'E-Service',
-                  route: '/me/e-service',
-                  trailing: 'บริการดิจิทัล'),
-              MeMenuItem(
-                  icon: Icons.credit_card_outlined,
-                  label: 'บัตร/บัญชีธนาคาร',
-                  route: '/payment-methods',
-                  trailing: 'จัดการช่องทางชำระเงิน'),
-              MeMenuItem(
-                  icon: Icons.verified_user_outlined,
-                  label: 'คุ้มครองสินค้า',
-                  route: '/me/help',
-                  trailing: 'ข้อมูลการรับประกัน'),
             ],
           ),
           const SizedBox(height: 10),
@@ -10818,6 +12222,11 @@ class MeProfileHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final account = appStore.customerAccount;
+    final isSignedIn = appStore.isAuthenticated;
+    final displayName = isSignedIn
+        ? (account?.nameOrEmail ?? account?.email ?? '')
+        : 'สมัครสมาชิกเพื่อเข้าสู่ระบบ';
+    final secondaryText = isSignedIn ? (account?.email ?? '') : '';
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 14, 8, 12),
       decoration: const BoxDecoration(
@@ -10825,36 +12234,62 @@ class MeProfileHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Container(
-            width: 54,
-            height: 54,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: const Icon(Icons.person, color: accent, size: 32),
-          ),
-          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  account?.nameOrEmail ?? 'ผู้ใช้ NP Market',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
+            child: InkWell(
+              onTap: isSignedIn
+                  ? () => Navigator.of(context).pushNamed('/me/profile')
+                  : () => requireCustomerLogin(context),
+              borderRadius: BorderRadius.circular(12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 54,
+                    height: 54,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: account?.avatarUrl.isNotEmpty == true
+                        ? Image.network(
+                            account!.avatarUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => const Icon(
+                              Icons.person,
+                              color: accent,
+                              size: 32,
+                            ),
+                          )
+                        : const Icon(Icons.person, color: accent, size: 32),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  seller == null
-                      ? account?.email ?? 'ลูกค้า'
-                      : 'ลูกค้า · ผู้ขาย ${seller?.shopName ?? ''}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 12.5),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          displayName,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        if (secondaryText.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            secondaryText,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 12.5),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           IconButton(
@@ -10879,110 +12314,53 @@ class MeProfileHeader extends StatelessWidget {
 }
 
 class LoginSecurityCard extends StatelessWidget {
-  const LoginSecurityCard({super.key});
+  const LoginSecurityCard({super.key, required this.onClose});
+
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
     return MeCard(
-      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+      padding: const EdgeInsets.fromLTRB(12, 9, 4, 9),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Icon(Icons.manage_accounts_outlined, color: accent, size: 30),
+          const Icon(Icons.login_outlined, color: accent, size: 22),
           const SizedBox(width: 10),
           const Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'เข้าสู่ระบบอย่างรวดเร็วและปลอดภัย',
+                  'สมัครสมาชิกเพื่อเข้าสู่ระบบ',
                   style: TextStyle(
-                      color: ink, fontWeight: FontWeight.w900, fontSize: 15),
+                      color: ink, fontWeight: FontWeight.w900, fontSize: 14),
                 ),
-                SizedBox(height: 4),
+                SizedBox(height: 2),
                 Text(
-                  'ตั้งรหัสผ่านและข้อมูลความปลอดภัย เพื่อใช้ซื้อสินค้าและเปิดร้านในแอปเดียว',
-                  style: TextStyle(color: muted, fontSize: 12.5, height: 1.35),
+                  'เข้าสู่ระบบเพื่อซื้อสินค้า เปิดร้าน และติดตามคำสั่งซื้อ',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: muted, fontSize: 11.5),
                 ),
               ],
             ),
           ),
           IconButton(
-            onPressed: appStore.signOutCustomer,
-            icon: const Icon(Icons.logout_outlined, color: muted),
-            tooltip: 'ออกจากระบบ',
+            onPressed: () => Navigator.of(context).pushNamed('/auth'),
+            icon: const Icon(Icons.chevron_right, color: muted),
+            tooltip: 'เข้าสู่ระบบ',
+            constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+          ),
+          IconButton(
+            onPressed: onClose,
+            icon: const Icon(Icons.close, color: muted),
+            tooltip: 'ปิด',
             constraints: const BoxConstraints.tightFor(width: 36, height: 36),
           ),
         ],
       ),
-    );
-  }
-}
-
-class MeVipStrip extends StatelessWidget {
-  const MeVipStrip({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: accent,
-      padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-      child: InkWell(
-        onTap: () => Navigator.of(context).pushNamed('/me/vouchers'),
-        borderRadius: BorderRadius.circular(6),
-        child: Container(
-          height: 34,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFFF2D9),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: const Row(
-            children: [
-              Icon(Icons.workspace_premium_outlined, color: accent, size: 20),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'สมัคร VIP รับโค้ดส่งฟรีและส่วนลดเพิ่ม',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: ink, fontSize: 12.5),
-                ),
-              ),
-              Icon(Icons.chevron_right, color: accent, size: 18),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class MePromoCampaignPanel extends StatelessWidget {
-  const MePromoCampaignPanel({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const MeShortcutPanel(
-      title: 'Promotions & Campaigns',
-      items: [
-        MeMenuItem(
-            icon: Icons.local_fire_department_outlined,
-            label: '8.8',
-            route: '/me/campaigns'),
-        MeMenuItem(
-            icon: Icons.workspace_premium_outlined,
-            label: 'VIP',
-            route: '/me/vouchers'),
-        MeMenuItem(
-            icon: Icons.local_shipping_outlined,
-            label: 'ส่งฟรี',
-            route: '/me/vouchers'),
-        MeMenuItem(
-            icon: Icons.campaign_outlined,
-            label: 'แคมเปญ',
-            route: '/me/campaigns'),
-      ],
     );
   }
 }
@@ -11768,6 +13146,270 @@ class AccountSettingsScreen extends StatelessWidget {
   }
 }
 
+class AccountProfileScreen extends StatefulWidget {
+  const AccountProfileScreen({super.key});
+
+  @override
+  State<AccountProfileScreen> createState() => _AccountProfileScreenState();
+}
+
+class _AccountProfileScreenState extends State<AccountProfileScreen> {
+  Uint8List? avatarPreview;
+  bool isUploadingAvatar = false;
+
+  Future<void> _pickAvatar() async {
+    if (isUploadingAvatar) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่สามารถอ่านไฟล์รูปนี้ได้')),
+      );
+      return;
+    }
+
+    setState(() {
+      avatarPreview = Uint8List.fromList(bytes);
+      isUploadingAvatar = true;
+    });
+    try {
+      await appStore.updateCustomerAvatar(
+        fileName: file.name,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('อัปเดตรูปโปรไฟล์แล้ว')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => avatarPreview = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) setState(() => isUploadingAvatar = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final account = appStore.customerAccount;
+    final name = account?.displayName.isNotEmpty == true
+        ? account!.displayName
+        : account?.email.split('@').first ?? '-';
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
+      appBar: AppBar(
+        title: const Text('แก้ไขโปรไฟล์'),
+        backgroundColor: Colors.white,
+        foregroundColor: ink,
+        elevation: 0,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 24),
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              children: [
+                InkWell(
+                  onTap: _pickAvatar,
+                  borderRadius: BorderRadius.circular(999),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        width: 76,
+                        height: 76,
+                        clipBehavior: Clip.antiAlias,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: const Color(0xFFFFEEF0),
+                          border: Border.all(color: line),
+                        ),
+                        child: avatarPreview != null
+                            ? Image.memory(avatarPreview!, fit: BoxFit.cover)
+                            : account?.avatarUrl.isNotEmpty == true
+                                ? Image.network(
+                                    account!.avatarUrl,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) => const Icon(
+                                      Icons.person,
+                                      color: accent,
+                                      size: 42,
+                                    ),
+                                  )
+                                : const Icon(Icons.person,
+                                    color: accent, size: 42),
+                      ),
+                      Positioned(
+                        right: -2,
+                        bottom: -2,
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: accent,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 2),
+                          ),
+                          child: isUploadingAvatar
+                              ? const Padding(
+                                  padding: EdgeInsets.all(5),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.add,
+                                  color: Colors.white, size: 16),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: _pickAvatar,
+                  borderRadius: BorderRadius.circular(8),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.edit_outlined, color: muted, size: 18),
+                      SizedBox(width: 4),
+                      Text('แก้ไข', style: TextStyle(color: muted)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          ProfileInfoGroup(
+            items: [
+              ProfileInfoItem(label: 'ชื่อ', value: name),
+              ProfileInfoItem(label: 'ประวัติ', value: 'ตั้งค่า'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const ProfileInfoGroup(
+            items: [
+              ProfileInfoItem(
+                  label: 'เพศ', value: 'ตั้งค่า', accentValue: true),
+              ProfileInfoItem(
+                  label: 'วันเกิด', value: 'ตั้งค่า', accentValue: true),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ProfileInfoGroup(
+            items: [
+              ProfileInfoItem(
+                label: 'โทรศัพท์',
+                value: maskPhone(account?.phone ?? ''),
+              ),
+              ProfileInfoItem(
+                label: 'อีเมล',
+                value: maskEmail(account?.email ?? ''),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ProfileInfoGroup extends StatelessWidget {
+  const ProfileInfoGroup({super.key, required this.items});
+
+  final List<ProfileInfoItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        children: [
+          for (var i = 0; i < items.length; i++) ...[
+            items[i],
+            if (i != items.length - 1)
+              const Divider(height: 1, indent: 14, color: line),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class ProfileInfoItem extends StatelessWidget {
+  const ProfileInfoItem({
+    super.key,
+    required this.label,
+    required this.value,
+    this.accentValue = false,
+  });
+
+  final String label;
+  final String value;
+  final bool accentValue;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 14, 8, 14),
+      child: Row(
+        children: [
+          Text(label, style: const TextStyle(color: ink, fontSize: 14.5)),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '-' : value,
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: accentValue ? accent : muted,
+                fontSize: 14,
+                fontWeight: accentValue ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          const Icon(Icons.chevron_right, color: muted, size: 20),
+        ],
+      ),
+    );
+  }
+}
+
+String maskPhone(String phone) {
+  final digits = phone.replaceAll(RegExp(r'\D'), '');
+  if (digits.length < 4) return phone;
+  return '${'*' * (digits.length - 2)}${digits.substring(digits.length - 2)}';
+}
+
+String maskEmail(String email) {
+  final parts = email.split('@');
+  if (parts.length != 2 || parts.first.isEmpty) return email;
+  final name = parts.first;
+  final visible = name.length <= 1 ? name : name.substring(0, 1);
+  return '$visible${'*' * 7}@${parts.last}';
+}
+
 class SettingsGroup extends StatelessWidget {
   const SettingsGroup({super.key, required this.title, required this.items});
 
@@ -11977,121 +13619,4 @@ const campaigns = [
   ),
 ];
 
-const recommendedShops = [
-  Shop(
-    id: 'shop-001',
-    name: 'NP Basics Store',
-    category: 'แฟชั่นและของใช้ประจำวัน',
-    rating: 4.9,
-    productCount: 128,
-    badge: 'ร้านแนะนำ',
-  ),
-  Shop(
-    id: 'shop-002',
-    name: 'Tech Corner',
-    category: 'มือถือและอุปกรณ์เสริม',
-    rating: 4.8,
-    productCount: 86,
-    badge: 'ขายดี',
-  ),
-  Shop(
-    id: 'shop-003',
-    name: 'Home Everyday',
-    category: 'ของใช้บ้าน',
-    rating: 4.7,
-    productCount: 214,
-    badge: 'ส่งไว',
-  ),
-];
-
-const featuredProducts = [
-  Product(
-    id: 'np-001',
-    name: 'เสื้อยืดคอตตอนพรีเมียม ใส่สบาย',
-    shopName: 'NP Basics Store',
-    category: 'แฟชั่น',
-    price: 199,
-    originalPrice: 290,
-    rating: 4.8,
-    soldCount: 1240,
-    imageUrl:
-        'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800',
-    badge: 'ส่งฟรี',
-    location: 'กรุงเทพฯ',
-    shippingLabel: 'ส่งฟรี',
-    serviceLabel: 'รับประกัน',
-    promoLabel: 'ลดเพิ่ม',
-    discountPercent: 31,
-    isVideo: false,
-    videoViews: '',
-    stock: 268,
-    colorOptions: ['ขาว', 'ดำ', 'เทา'],
-    sizeOptions: ['S', 'M', 'L', 'XL'],
-  ),
-  Product(
-    id: 'np-002',
-    name: 'กระเป๋าสะพายมินิมอล ใช้ได้ทุกวัน',
-    shopName: 'Daily Bag Studio',
-    category: 'แฟชั่น',
-    price: 359,
-    originalPrice: 490,
-    rating: 4.7,
-    soldCount: 802,
-    imageUrl:
-        'https://images.unsplash.com/photo-1594223274512-ad4803739b7c?w=800',
-    badge: 'ลด 27%',
-    location: 'นนทบุรี',
-    shippingLabel: 'ส่งฟรี',
-    serviceLabel: 'ร้านแนะนำ',
-    promoLabel: 'คูปองร้าน',
-    discountPercent: 27,
-    isVideo: true,
-    videoViews: '12.8k',
-    stock: 86,
-    colorOptions: ['ฟ้า', 'ดำ', 'ครีม'],
-  ),
-  Product(
-    id: 'np-003',
-    name: 'หูฟังไร้สายพร้อมเคสชาร์จ แบตอึด',
-    shopName: 'Tech Corner',
-    category: 'มือถือ',
-    price: 690,
-    originalPrice: 990,
-    rating: 4.9,
-    soldCount: 521,
-    imageUrl:
-        'https://images.unsplash.com/photo-1606220945770-b5b6c2c55bf1?w=800',
-    badge: 'ขายดี',
-    location: 'ชลบุรี',
-    shippingLabel: '2-3 วัน',
-    serviceLabel: 'COD',
-    promoLabel: 'ช้อปปิ้งถูกชัวร์',
-    discountPercent: 30,
-    isVideo: true,
-    videoViews: '8.4k',
-    stock: 44,
-    colorOptions: ['ดำ', 'ขาว'],
-    sizeOptions: ['Standard'],
-  ),
-  Product(
-    id: 'np-004',
-    name: 'แก้วเก็บอุณหภูมิ 600ml พร้อมฝาปิด',
-    shopName: 'Home Everyday',
-    category: 'ของใช้บ้าน',
-    price: 249,
-    originalPrice: 390,
-    rating: 4.6,
-    soldCount: 368,
-    imageUrl: 'https://images.unsplash.com/photo-1544787219-7f47ccb76574?w=800',
-    badge: 'โปรวันนี้',
-    location: 'เชียงใหม่',
-    shippingLabel: 'ส่งฟรี',
-    serviceLabel: 'พร้อมส่ง',
-    promoLabel: 'ลดทั้งร้าน',
-    discountPercent: 36,
-    isVideo: false,
-    videoViews: '',
-    stock: 120,
-    colorOptions: ['ขาว', 'น้ำตาล'],
-  ),
-];
+const recommendedShops = <Shop>[];

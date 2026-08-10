@@ -18,6 +18,7 @@ class Product {
     required this.discountPercent,
     required this.isVideo,
     required this.videoViews,
+    this.videoUrl = '',
     this.stock = 268,
     this.colorOptions = const [],
     this.sizeOptions = const [],
@@ -42,6 +43,7 @@ class Product {
   final int discountPercent;
   final bool isVideo;
   final String videoViews;
+  final String videoUrl;
   final int stock;
   final List<String> colorOptions;
   final List<String> sizeOptions;
@@ -96,6 +98,7 @@ class CustomerAccount {
     required this.email,
     required this.displayName,
     required this.phone,
+    this.avatarUrl = '',
     this.role = 'buyer',
     this.hasProfile = true,
   });
@@ -104,14 +107,36 @@ class CustomerAccount {
   final String email;
   final String displayName;
   final String phone;
+  final String avatarUrl;
   final String role;
   final bool hasProfile;
 
   String get nameOrEmail => displayName.isNotEmpty ? displayName : email;
+
+  CustomerAccount copyWith({
+    String? id,
+    String? email,
+    String? displayName,
+    String? phone,
+    String? avatarUrl,
+    String? role,
+    bool? hasProfile,
+  }) {
+    return CustomerAccount(
+      id: id ?? this.id,
+      email: email ?? this.email,
+      displayName: displayName ?? this.displayName,
+      phone: phone ?? this.phone,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
+      role: role ?? this.role,
+      hasProfile: hasProfile ?? this.hasProfile,
+    );
+  }
 }
 
 class SellerProfile {
   const SellerProfile({
+    this.id = '',
     required this.shopName,
     required this.category,
     required this.ownerName,
@@ -119,11 +144,22 @@ class SellerProfile {
     required this.address,
     this.description = '',
     this.pickupProvince = '',
+    this.pickupDistrict = '',
+    this.pickupSubDistrict = '',
+    this.pickupPostcode = '',
     this.enabledCarriers = const [],
     this.logoUrl = '',
+    this.identityCardUrl = '',
+    this.bankBookUrl = '',
+    this.bankAccountName = '',
+    this.bankAccountNumber = '',
+    this.bankName = '',
     this.isVerified = false,
+    this.status = 'pending_review',
+    this.reviewNote = '',
   });
 
+  final String id;
   final String shopName;
   final String category;
   final String ownerName;
@@ -131,9 +167,67 @@ class SellerProfile {
   final String address;
   final String description;
   final String pickupProvince;
+  final String pickupDistrict;
+  final String pickupSubDistrict;
+  final String pickupPostcode;
   final List<String> enabledCarriers;
   final String logoUrl;
+  final String identityCardUrl;
+  final String bankBookUrl;
+  final String bankAccountName;
+  final String bankAccountNumber;
+  final String bankName;
   final bool isVerified;
+  final String status;
+  final String reviewNote;
+
+  SellerProfile copyWith({
+    String? id,
+    String? shopName,
+    String? category,
+    String? ownerName,
+    String? phone,
+    String? address,
+    String? description,
+    String? pickupProvince,
+    String? pickupDistrict,
+    String? pickupSubDistrict,
+    String? pickupPostcode,
+    List<String>? enabledCarriers,
+    String? logoUrl,
+    String? identityCardUrl,
+    String? bankBookUrl,
+    String? bankAccountName,
+    String? bankAccountNumber,
+    String? bankName,
+    bool? isVerified,
+    String? status,
+    String? reviewNote,
+  }) {
+    return SellerProfile(
+      id: id ?? this.id,
+      shopName: shopName ?? this.shopName,
+      category: category ?? this.category,
+      ownerName: ownerName ?? this.ownerName,
+      phone: phone ?? this.phone,
+      address: address ?? this.address,
+      description: description ?? this.description,
+      pickupProvince: pickupProvince ?? this.pickupProvince,
+      pickupDistrict: pickupDistrict ?? this.pickupDistrict,
+      pickupSubDistrict: pickupSubDistrict ?? this.pickupSubDistrict,
+      pickupPostcode: pickupPostcode ?? this.pickupPostcode,
+      enabledCarriers: enabledCarriers ?? this.enabledCarriers,
+      logoUrl: logoUrl ?? this.logoUrl,
+      identityCardUrl: identityCardUrl ?? this.identityCardUrl,
+      bankBookUrl: bankBookUrl ?? this.bankBookUrl,
+      bankAccountName: bankAccountName ?? this.bankAccountName,
+      bankAccountNumber: bankAccountNumber ?? this.bankAccountNumber,
+      bankName: bankName ?? this.bankName,
+      isVerified: isVerified ?? this.isVerified,
+      status: status ?? this.status,
+      reviewNote: reviewNote ?? this.reviewNote,
+    );
+  }
 }
 
 class CartItem {
